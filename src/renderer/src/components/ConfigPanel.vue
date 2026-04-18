@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import type { AppConfig, FudaiTypes } from '../types'
+import type { AppConfig, FudaiTypes, RunStats } from '../types'
 import type { MessageKey } from '../composables/useI18n'
 
 const props = defineProps<{
   config: AppConfig
+  runStats: RunStats | null
   t: (key: MessageKey) => string
 }>()
 
@@ -76,9 +77,21 @@ function updateBudget(value: string) {
           />
           <span class="budget-info">
             {{ t('used') }}: {{ config.diamondUsed }}
+            · {{ t('diamondProfit') }}: {{ runStats?.diamondWonAmount || config.runStats.diamondWonAmount || 0 }}
             <button class="btn-link" @click="emit('resetDiamond')">{{ t('reset') }}</button>
           </span>
         </div>
+      </div>
+      <div class="config-item">
+        <label>{{ t('allowDiamondProfit') }}</label>
+        <label class="checkbox-label">
+          <input
+            type="checkbox"
+            :checked="config.allowDiamondProfit"
+            @change="emit('update', { allowDiamondProfit: ($event.target as HTMLInputElement).checked })"
+          />
+          {{ config.allowDiamondProfit ? t('enabled') : '-' }}
+        </label>
       </div>
       <div class="config-item">
         <label>{{ t('autoFollow') }}</label>

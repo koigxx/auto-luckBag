@@ -22,6 +22,7 @@ export interface RunStats {
   participated: number
   physicalWins: number
   diamondWins: number
+  diamondWonAmount: number
   couponWins: number
   lastStartedAt: number | null
   lastStoppedAt: number | null
@@ -32,6 +33,7 @@ export interface AppConfig {
   fudaiTypes: FudaiTypes
   diamondBudget: number
   diamondUsed: number
+  allowDiamondProfit: boolean
   autoFollow: boolean
   debugLogs: boolean
   scanIntervalSeconds: number

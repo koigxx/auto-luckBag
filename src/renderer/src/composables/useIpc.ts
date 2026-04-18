@@ -26,7 +26,6 @@ export function useIpc() {
   let unsubRoomRemoved: (() => void) | null = null
   let unsubRunStats: (() => void) | null = null
   let unsubAutoRun: (() => void) | null = null
-  let roomCountdownTimer: number | null = null
 
   onMounted(async () => {
     const authStatus = await window.api.auth.status()
@@ -58,21 +57,13 @@ export function useIpc() {
 
     unsubRunStats = window.api.on('run-stats:update', (entry: RunStats) => {
       runStats.value = entry
+      if (config.value) config.value.runStats = entry
     })
 
     unsubAutoRun = window.api.on('auto-run:update', (entry: AutoRunState) => {
       autoRunState.value = entry
     })
 
-    roomCountdownTimer = window.setInterval(() => {
-      rooms.value = rooms.value.map((room) => ({
-        ...room,
-        remainingSeconds:
-          typeof room.remainingSeconds === 'number' && room.remainingSeconds > 0
-            ? room.remainingSeconds - 1
-            : room.remainingSeconds
-      }))
-    }, 1000)
   })
 
   onUnmounted(() => {
@@ -81,10 +72,6 @@ export function useIpc() {
     unsubLogAdd?.()
     unsubRunStats?.()
     unsubAutoRun?.()
-    if (roomCountdownTimer !== null) {
-      window.clearInterval(roomCountdownTimer)
-      roomCountdownTimer = null
-    }
   })
 
   async function login() {
@@ -184,7 +171,7 @@ export function useIpc() {
       nextScanAt: now,
       candidateCount: autoRunState.value?.candidateCount || 0,
       pendingVerifyCount: autoRunState.value?.pendingVerifyCount || 0,
-      enterBeforeSeconds: options.enterBeforeSeconds || 180,
+      enterBeforeSeconds: options.enterBeforeSeconds || 120,
       candidatePoolLimit: Math.min(5, Math.max(1, options.candidatePoolLimit || 5)),
       candidates: autoRunState.value?.candidates || [],
       riskPausedUntil: autoRunState.value?.riskPausedUntil || null,
@@ -237,6 +224,8 @@ export function useIpc() {
 
   async function resetRunStats() {
     runStats.value = await window.api.runStats.reset()
+    if (config.value) config.value.runStats = runStats.value
+    await refreshStats()
   }
 
   async function removeRoom(roomId: string) {

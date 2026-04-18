@@ -17,6 +17,7 @@ export interface RunStats {
   participated: number
   physicalWins: number
   diamondWins: number
+  diamondWonAmount: number
   couponWins: number
   lastStartedAt: number | null
   lastStoppedAt: number | null
@@ -27,6 +28,7 @@ export interface AppConfig {
   fudaiTypes: FudaiTypes
   diamondBudget: number
   diamondUsed: number
+  allowDiamondProfit: boolean
   autoFollow: boolean
   debugLogs: boolean
   scanIntervalSeconds: number
@@ -47,10 +49,11 @@ const defaults: AppConfig = {
   },
   diamondBudget: 10,
   diamondUsed: 0,
+  allowDiamondProfit: false,
   autoFollow: true,
   debugLogs: false,
   scanIntervalSeconds: 50,
-  enterBeforeSeconds: 180,
+  enterBeforeSeconds: 120,
   candidatePoolLimit: 5,
   rooms: [],
   preferredRooms: [],
@@ -58,6 +61,7 @@ const defaults: AppConfig = {
     participated: 0,
     physicalWins: 0,
     diamondWins: 0,
+    diamondWonAmount: 0,
     couponWins: 0,
     lastStartedAt: null,
     lastStoppedAt: null

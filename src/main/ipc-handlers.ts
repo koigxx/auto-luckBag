@@ -148,12 +148,16 @@ export function setupIpcHandlers(
   ipcMain.handle('stats:get', () => {
     const rooms = roomManager.getAllRooms()
     const totalFudai = rooms.reduce((sum, room) => sum + room.fudaiCount, 0)
+    const runStats = statsService.getStats()
+    const diamondBudget = store.get('diamondBudget')
+    const diamondUsed = store.get('diamondUsed')
+    const effectiveBudget = diamondBudget + (store.get('allowDiamondProfit') ? runStats.diamondWonAmount || 0 : 0)
     return {
       totalFudai,
       activeRooms: rooms.filter((room) => room.status === 'monitoring').length,
-      diamondBudget: store.get('diamondBudget'),
-      diamondUsed: store.get('diamondUsed'),
-      diamondRemaining: store.get('diamondBudget') - store.get('diamondUsed')
+      diamondBudget: effectiveBudget,
+      diamondUsed,
+      diamondRemaining: effectiveBudget - diamondUsed
     }
   })
 

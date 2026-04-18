@@ -15,6 +15,7 @@ export interface FudaiGrabResult {
   participated: boolean
   won: boolean
   prizeType: 'physical' | 'diamond' | 'coupon' | 'unknown' | null
+  diamondAmount: number
   resultText: string
 }
 
@@ -250,7 +251,7 @@ export class FudaiService {
       this.callbacks.onLog(
         `准备执行福袋任务：关注=${enrichedInfo.requiresFollow ? '是' : '否'}，粉丝团=${enrichedInfo.requiresFanBadge ? '是' : '否'}，评论=${enrichedInfo.requiresComment ? '是' : '否'}，口令=${enrichedInfo.commentText || '无'}`
       )
-      if (enrichedInfo.requiresFollow || enrichedInfo.requiresFanBadge) await this.handleFollowRequirement()
+      if (enrichedInfo.requiresFollow && !enrichedInfo.requiresFanBadge) await this.handleFollowRequirement()
       if (!this.canWork()) return
 
       if (enrichedInfo.requiresComment) {
@@ -329,6 +330,15 @@ export class FudaiService {
   }
 
   private async refreshLotteryPanelAfterTask(): Promise<void> {
+    const startedAt = Date.now()
+    while (Date.now() - startedAt < 3000 && this.canWork()) {
+      if (await this.hasLotteryFanBadgeAction()) {
+        this.debugLog('评论后当前福袋弹窗已出现粉丝团按钮，直接继续执行')
+        return
+      }
+      await this.page.waitForTimeout(300).catch(() => {})
+    }
+
     this.latestLotteryRight = null
     const clicked = await this.clickVisibleFudaiIcon()
     if (!clicked) {
@@ -336,6 +346,46 @@ export class FudaiService {
       return
     }
     await this.waitForLotteryPanelOrRightInfo(5000)
+  }
+
+  private async hasLotteryFanBadgeAction(): Promise<boolean> {
+    return this.page
+      .evaluate(() => {
+        const normalize = (text: string) => text.replace(/\s+/g, ' ').trim()
+        const isVisible = (element: Element) => {
+          const style = window.getComputedStyle(element)
+          const rect = element.getBoundingClientRect()
+          return (
+            style.display !== 'none' &&
+            style.visibility !== 'hidden' &&
+            Number(style.opacity || 1) > 0.05 &&
+            rect.width >= 8 &&
+            rect.height >= 8 &&
+            rect.bottom > 0 &&
+            rect.right > 0 &&
+            rect.top < window.innerHeight &&
+            rect.left < window.innerWidth
+          )
+        }
+        const hasLotteryContext = (element: Element) => {
+          let current: Element | null = element
+          for (let depth = 0; current && depth < 8; depth++) {
+            const text = normalize(current.textContent || '')
+            if (/福袋|参与条件|发送评论|倒计时/.test(text)) return true
+            current = current.parentElement
+          }
+          return false
+        }
+
+        return Array.from(document.querySelectorAll('button, [role="button"], div, span, p')).some((element) => {
+          const text = normalize(element.textContent || '')
+          const isAction =
+            text.length <= 40 &&
+            /(?:加入粉丝团|点亮粉丝团|点亮灯牌|粉丝团点亮)\s*[（(]\s*\d+\s*钻(?:石)?\s*[）)]/.test(text)
+          return isAction && isVisible(element) && hasLotteryContext(element)
+        })
+      })
+      .catch(() => false)
   }
 
   private async clickVisibleFudaiIcon(): Promise<boolean> {
@@ -500,7 +550,7 @@ export class FudaiService {
         const viewportArea = Math.max(1, window.innerWidth * window.innerHeight)
         const keywords = ['确认点亮', '确认加入', '确认开通', '点亮粉丝团', '粉丝团点亮', '加入粉丝团', '开通粉丝团']
         const contextKeywords = /粉丝团|灯牌|点亮粉丝团|粉丝团点亮|加入粉丝团|开通粉丝团/
-        const ordinaryGiftText = /小心心|热气球|跑车|比心兔兔|人气票|Thuglife|春日蝶舞|亲吻|闪耀星辰|大啤酒|玫瑰|抖音|QQ|WW|EE/
+        const ordinaryGiftText = /小心心|热气球|跑车|比心兔兔|人气票|Thuglife|春日蝶舞|亲吻|闪耀星辰|大啤酒|玫瑰|抖音|QQ|WW|EE|送点亮粉丝团|送粉丝团灯牌|送出了|送出|x\s*1|×\s*1/
         const isVisible = (element: Element) => {
           const style = window.getComputedStyle(element)
           const rect = element.getBoundingClientRect()
@@ -532,25 +582,40 @@ export class FudaiService {
             const rect = element.getBoundingClientRect()
             const text = normalize(element.textContent || '')
             const ctx = contextText(element)
+            const precisePaidAction = /^(?:加入粉丝团|点亮粉丝团|点亮灯牌|粉丝团点亮)\s*[（(]\s*\d+\s*钻(?:石)?\s*[）)]$/.test(text)
+            const shortPaidAction =
+              text.length <= 40 &&
+              /(?:加入粉丝团|点亮粉丝团|点亮灯牌|粉丝团点亮)\s*[（(]\s*\d+\s*钻(?:石)?\s*[）)]/.test(text)
+            const explicitConfirm = /^(?:确认点亮|确认加入|确认开通|确定|支付|开通粉丝团|点亮粉丝团)$/.test(text)
             const isOrdinaryGiftCell =
               ordinaryGiftText.test(text) ||
               (/^\d+\s*钻(?:石)?/.test(text) && /赠送|送出/.test(text) && !/粉丝团|灯牌|点亮/.test(text))
             const hasFanBadgeContext = contextKeywords.test(ctx) || contextKeywords.test(text)
-            const isActionButton =
-              /加入粉丝团\s*[（(]\s*\d+\s*钻(?:石)?\s*[）)]|点亮粉丝团\s*[（(]\s*\d+\s*钻(?:石)?\s*[）)]|确认|确定|支付|开通|点亮/.test(text)
+            const isActionButton = precisePaidAction || shortPaidAction || explicitConfirm
             const isStatusLabel = /未达成|参与条件|倒计时/.test(text) && !isActionButton
+            const isUnsafeFeed = rect.left < 150 || /在线观众|贡献用户|加入了直播间|为主播加了|送粉丝团灯牌|送点亮粉丝团/.test(ctx)
+            const isLargeContainer = text.length > 60 || rect.width > 380 || rect.height > 90
             const score =
-              (isActionButton ? 30 : 0) +
+              (precisePaidAction ? 120 : 0) +
+              (shortPaidAction ? 90 : 0) +
+              (explicitConfirm ? 35 : 0) +
               (keywords.some((keyword) => text.includes(keyword)) ? 12 : 0) +
-              (/确认|确定|支付|点亮|开通/.test(text) ? 6 : 0) +
               (hasFanBadgeContext ? 8 : 0) -
               (isOrdinaryGiftCell ? 100 : 0) -
               (isStatusLabel ? 100 : 0) -
-              (text === '加入粉丝团' || text === '点亮灯牌' ? 20 : 0)
-            return { element, rect, text, area: rect.width * rect.height, score, hasFanBadgeContext, isOrdinaryGiftCell, isActionButton }
+              (isUnsafeFeed ? 120 : 0) -
+              (isLargeContainer ? 80 : 0)
+            return { element, rect, text, area: rect.width * rect.height, score, hasFanBadgeContext, isOrdinaryGiftCell, isActionButton, isUnsafeFeed, isLargeContainer }
           })
-          .filter(({ element, text, score, hasFanBadgeContext, isOrdinaryGiftCell, isActionButton }) =>
-            text && score > 0 && hasFanBadgeContext && !isOrdinaryGiftCell && isActionButton && isVisible(element)
+          .filter(({ element, text, score, hasFanBadgeContext, isOrdinaryGiftCell, isActionButton, isUnsafeFeed, isLargeContainer }) =>
+            text &&
+            score > 0 &&
+            hasFanBadgeContext &&
+            !isOrdinaryGiftCell &&
+            !isUnsafeFeed &&
+            !isLargeContainer &&
+            isActionButton &&
+            isVisible(element)
           )
           .sort((a, b) => b.score - a.score || a.area - b.area)
 
@@ -599,13 +664,7 @@ export class FudaiService {
   }
 
   private async handleFollowRequirement(): Promise<void> {
-    const clicked = await this.clickVisibleTextAction({
-      keywords: ['关注', '去关注'],
-      excludeKeywords: ['已关注', '取消关注'],
-      exact: false,
-      maxAreaRatio: 0.15,
-      logLabel: '关注主播'
-    })
+    const clicked = await this.clickPreciseFollowButton()
     if (clicked) {
       await this.randomDelay(500, 900)
       this.callbacks.onLog('已自动关注主播')
@@ -613,6 +672,75 @@ export class FudaiService {
     }
 
     this.callbacks.onLog('未找到可点击关注按钮，可能已经关注或按钮暂未展示')
+  }
+
+  private async clickPreciseFollowButton(): Promise<boolean> {
+    const target = await this.page
+      .evaluate(() => {
+        const normalize = (text: string) => text.replace(/\s+/g, ' ').trim()
+        const isVisible = (element: Element) => {
+          const style = window.getComputedStyle(element)
+          const rect = element.getBoundingClientRect()
+          return (
+            style.display !== 'none' &&
+            style.visibility !== 'hidden' &&
+            Number(style.opacity || 1) > 0.05 &&
+            rect.width >= 20 &&
+            rect.height >= 14 &&
+            rect.bottom > 0 &&
+            rect.right > 0 &&
+            rect.top < window.innerHeight &&
+            rect.left < window.innerWidth
+          )
+        }
+        const candidates = Array.from(document.querySelectorAll('button, [role="button"], div, span, p'))
+          .map((element) => {
+            const rect = element.getBoundingClientRect()
+            const text = normalize(element.textContent || '')
+            const exactFollow = /^(关注|去关注|关注\s*G|关注G)$/.test(text)
+            const tinyFollow = /关注/.test(text) && text.length <= 8
+            const unsafeContainer = /本场点赞|\+加粉丝团|加会员|小时榜|人气榜|退出直播间|粉丝团|酷炫勋章|专属礼物|进场特效/.test(text)
+            const score =
+              (exactFollow ? 100 : 0) +
+              (tinyFollow ? 30 : 0) +
+              (rect.width <= 100 && rect.height <= 40 ? 20 : 0) -
+              (unsafeContainer ? 200 : 0) -
+              (text.length > 12 ? 80 : 0)
+            return { element, rect, text, area: rect.width * rect.height, score }
+          })
+          .filter(({ element, text, rect, score }) =>
+            text &&
+            score > 0 &&
+            /关注/.test(text) &&
+            !/已关注|取消关注/.test(text) &&
+            rect.width <= 120 &&
+            rect.height <= 48 &&
+            isVisible(element)
+          )
+          .sort((a, b) => b.score - a.score || a.area - b.area)
+
+        ;(window as any).__luckBagDebugCandidates = candidates.slice(0, 8).map(({ rect, text, area, score }) => ({
+          text: text.slice(0, 80),
+          x: Math.round(rect.left),
+          y: Math.round(rect.top),
+          w: Math.round(rect.width),
+          h: Math.round(rect.height),
+          area: Math.round(area),
+          score
+        }))
+
+        const node = candidates[0]?.element
+        if (!node) return null
+        const rect = node.getBoundingClientRect()
+        return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, text: normalize(node.textContent || '') }
+      })
+      .catch(() => null)
+
+    await this.logDebugCandidates('关注主播')
+    if (!target) return false
+    await this.page.mouse.click(target.x, target.y)
+    this.callbacks.onLog(`已点击关注主播: ${target.text.slice(0, 30)}`)
+    return true
   }
 
   private async clickFanBadgeEntry(): Promise<boolean> {
@@ -669,24 +797,30 @@ export class FudaiService {
             const text = normalize(element.textContent || '')
             const ctx = contextText(element)
             const inLotteryTask = /福袋|参与条件|发送评论|倒计时/.test(ctx)
-            const isAction =
-              /加入粉丝团\s*[（(]\s*\d+\s*钻(?:石)?\s*[）)]|点亮粉丝团\s*[（(]\s*\d+\s*钻(?:石)?\s*[）)]|加入粉丝团|点亮灯牌|粉丝团点亮/.test(text)
+            const precisePaidAction = /^(?:加入粉丝团|点亮粉丝团|点亮灯牌|粉丝团点亮)\s*[（(]\s*\d+\s*钻(?:石)?\s*[）)]$/.test(text)
+            const shortPaidAction =
+              text.length <= 40 &&
+              /(?:加入粉丝团|点亮粉丝团|点亮灯牌|粉丝团点亮)\s*[（(]\s*\d+\s*钻(?:石)?\s*[）)]/.test(text)
+            const shortGenericAction = /^(?:加入粉丝团|点亮粉丝团|点亮灯牌|粉丝团点亮)$/.test(text)
+            const isAction = precisePaidAction || shortPaidAction || shortGenericAction
             const isStatusOnly = /未达成|参与条件|发送评论|倒计时/.test(text) && !/[（(]\s*\d+\s*钻(?:石)?\s*[）)]/.test(text)
             const isHeaderCard = rect.top < 170 && /酷炫勋章|专属礼物|进场特效|加会员/.test(ctx)
+            const isLargeContainer = text.length > 60 || rect.width > 360 || rect.height > 80
             const score =
-              (/[（(]\s*\d+\s*钻(?:石)?\s*[）)]/.test(text) ? 50 : 0) +
-              (/加入粉丝团|点亮粉丝团|点亮灯牌|粉丝团点亮/.test(text) ? 20 : 0) +
+              (precisePaidAction ? 120 : 0) +
+              (shortPaidAction ? 90 : 0) +
+              (shortGenericAction ? 25 : 0) +
               (inLotteryTask ? 20 : 0) +
               (rect.height >= 28 ? 8 : 0) -
               (isStatusOnly ? 80 : 0) -
               (isHeaderCard ? 80 : 0) -
-              (text === '加入粉丝团' || text === '点亮灯牌' ? 10 : 0)
-            return { element, rect, text, area: rect.width * rect.height, score, isAction, inLotteryTask, isStatusOnly, isHeaderCard }
+              (isLargeContainer ? 120 : 0)
+            return { element, rect, text, area: rect.width * rect.height, score, isAction, inLotteryTask, isStatusOnly, isHeaderCard, isLargeContainer }
           })
-          .filter(({ element, text, score, isAction, inLotteryTask, isStatusOnly, isHeaderCard }) =>
-            text && score > 0 && isAction && inLotteryTask && !isStatusOnly && !isHeaderCard && isVisible(element)
+          .filter(({ element, text, score, isAction, inLotteryTask, isStatusOnly, isHeaderCard, isLargeContainer }) =>
+            text && score > 0 && isAction && inLotteryTask && !isStatusOnly && !isHeaderCard && !isLargeContainer && isVisible(element)
           )
-          .sort((a, b) => b.score - a.score || b.area - a.area)
+          .sort((a, b) => b.score - a.score || a.area - b.area)
 
         ;(window as any).__luckBagDebugCandidates = candidates.slice(0, 8).map(({ rect, text, area, score }) => ({
           text: text.slice(0, 80),
@@ -717,7 +851,9 @@ export class FudaiService {
 
   private async handleFanBadgeRequirement(cost: number): Promise<boolean> {
     const config = store.store
-    const remaining = config.diamondBudget - config.diamondUsed
+    const stats = store.get('runStats')
+    const effectiveBudget = config.diamondBudget + (config.allowDiamondProfit ? stats.diamondWonAmount || 0 : 0)
+    const remaining = effectiveBudget - config.diamondUsed
     if (remaining < cost) {
       this.callbacks.onFudaiSkipped(`钻石预算不足，剩余=${remaining}，需要=${cost}`)
       return false
@@ -731,6 +867,13 @@ export class FudaiService {
     }
 
     await this.randomDelay(600, 1000)
+    if (await this.waitForFanBadgeSatisfied(2500)) {
+      store.set('diamondUsed', config.diamondUsed + cost)
+      this.callbacks.onFanBadgeAdded(cost)
+      this.callbacks.onLog(`已确认加入粉丝团/点亮灯牌，花费 ${cost} 钻石`)
+      return true
+    }
+
     const confirmed = await this.clickFanBadgeConfirm()
     if (!confirmed) {
       this.callbacks.onFudaiSkipped('未找到明确的粉丝团/灯牌确认按钮，已避免误送普通礼物')
@@ -951,11 +1094,20 @@ export class FudaiService {
     else if (won && hasDiamond) prizeType = 'diamond'
     else if (won && hasPhysical) prizeType = 'physical'
     else if (won) prizeType = 'unknown'
+    const diamondAmount =
+      prizeType === 'diamond'
+        ? Number(
+            compactText.match(/(?:获得|中奖|抽中|中了|恭喜)[^0-9]{0,30}(\d{1,6})\s*(?:钻石|钻|抖币)/)?.[1] ||
+              compactText.match(/(\d{1,6})\s*(?:钻石|钻|抖币)/)?.[1] ||
+              0
+          )
+        : 0
 
     return {
       participated,
       won,
       prizeType,
+      diamondAmount,
       resultText: compactText.slice(0, 180)
     }
   }

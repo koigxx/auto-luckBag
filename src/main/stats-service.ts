@@ -9,7 +9,11 @@ export class StatsService {
   }
 
   getStats(): RunStats {
-    return store.get('runStats')
+    const stats = store.get('runStats')
+    return {
+      ...stats,
+      diamondWonAmount: stats.diamondWonAmount || 0
+    }
   }
 
   markStarted(): void {
@@ -35,6 +39,7 @@ export class StatsService {
       next.physicalWins += 1
     } else if (result.prizeType === 'diamond') {
       next.diamondWins += 1
+      next.diamondWonAmount = (next.diamondWonAmount || 0) + Math.max(0, Math.floor(result.diamondAmount || 0))
     } else if (result.prizeType === 'coupon') {
       next.couponWins += 1
     }
@@ -47,6 +52,7 @@ export class StatsService {
       participated: 0,
       physicalWins: 0,
       diamondWins: 0,
+      diamondWonAmount: 0,
       couponWins: 0,
       lastStartedAt: null,
       lastStoppedAt: null
@@ -67,4 +73,3 @@ export class StatsService {
     this.onUpdate?.(stats)
   }
 }
-

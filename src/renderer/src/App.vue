@@ -51,6 +51,7 @@ function updateLanguage(nextLanguage: Language) {
       <ConfigPanel
         v-if="config"
         :config="config"
+        :run-stats="runStats"
         :t="t"
         @update="updateConfig"
         @reset-diamond="resetDiamondUsed"

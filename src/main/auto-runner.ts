@@ -45,8 +45,8 @@ export interface AutoRunState {
 
 const DEFAULT_SOURCE_URL = ''
 const DEFAULT_SCAN_INTERVAL_SECONDS = 50
-const MIN_ENTER_BEFORE_SECONDS = 180
-const DEFAULT_ENTER_BEFORE_SECONDS = 180
+const MIN_ENTER_BEFORE_SECONDS = 120
+const DEFAULT_ENTER_BEFORE_SECONDS = 120
 const MAX_PENDING_VERIFY = 5
 const MAX_CANDIDATES = 5
 const DEFAULT_CANDIDATE_POOL_LIMIT = 5
@@ -54,6 +54,7 @@ const RISK_PAUSE_MS = 10 * 60 * 1000
 const CANDIDATE_TTL_MS = 30 * 60 * 1000
 const REJECTED_CANDIDATE_TTL_MS = 30 * 60 * 1000
 const VERIFY_DIRECT_ENTER_EXTRA_SECONDS = 15
+const VERIFY_DIRECT_ENTER_LATE_TOLERANCE_SECONDS = 20
 const AFTER_DRAW_RESUME_BUFFER_SECONDS = 20
 const RECHECK_CANDIDATE_TTL_MS = 8 * 60 * 1000
 const SCAN_OPERATION_TIMEOUT_MS = 75_000
@@ -402,7 +403,17 @@ export class AutoRunner {
       }
 
       const directEnterThreshold = this.state.enterBeforeSeconds + VERIFY_DIRECT_ENTER_EXTRA_SECONDS
-      if (remainingSeconds !== null && remainingSeconds > 2 && remainingSeconds <= directEnterThreshold) {
+      const directEnterLowerBound = Math.max(2, this.state.enterBeforeSeconds - VERIFY_DIRECT_ENTER_LATE_TOLERANCE_SECONDS)
+      if (
+        remainingSeconds !== null &&
+        remainingSeconds > directEnterLowerBound &&
+        remainingSeconds <= directEnterThreshold
+      ) {
+        if (!this.hasDiamondBudgetForRoom(result.room)) {
+          await this.closeVerificationPage(result)
+          this.log(`钻石预算已达上限，跳过需要粉丝团的临近开奖直播间：${result.room.name}`)
+          return 0
+        }
         const conflict = this.findDrawTimeConflict(result.room)
         if (conflict) {
           await this.closeVerificationPage(result)
@@ -445,6 +456,10 @@ export class AutoRunner {
       await this.closeVerificationPage(result)
       if (remainingSeconds !== null && remainingSeconds <= this.state.enterBeforeSeconds) {
         this.log(`候选已接近或错过提前进房窗口，未加入候选池：${result.room.name}，剩余=${remainingSeconds}秒`)
+        return 0
+      }
+      if (!this.hasDiamondBudgetForRoom(result.room)) {
+        this.log(`钻石预算已达上限，未加入需要粉丝团的候选：${result.room.name}`)
         return 0
       }
       const conflict = this.findDrawTimeConflict(result.room)
@@ -653,7 +668,7 @@ export class AutoRunner {
     for (const existing of this.roomManager.getAllRooms()) {
       if (existing.url === room.url) continue
       if (typeof existing.remainingSeconds !== 'number' || existing.remainingSeconds <= 0) continue
-      const existingDrawAt = Date.now() + existing.remainingSeconds * 1000
+      const existingDrawAt = Date.now() + Math.max(0, existing.remainingSeconds) * 1000
       const diffSeconds = Math.floor(Math.abs(roomDrawAt - existingDrawAt) / 1000)
       if (diffSeconds < this.state.enterBeforeSeconds) {
         return { name: existing.name, diffSeconds }
@@ -671,6 +686,9 @@ export class AutoRunner {
   }
 
   private currentRemainingSeconds(room: VerifiedFudaiRoom): number | null {
+    if (typeof room.drawAt === 'number' && room.drawAt > 0) {
+      return Math.max(0, Math.ceil((room.drawAt - Date.now()) / 1000))
+    }
     if (room.remainingSeconds === null) return null
     const elapsedSeconds = Math.floor((Date.now() - room.verifiedAt) / 1000)
     return Math.max(0, room.remainingSeconds - elapsedSeconds)
@@ -747,6 +765,18 @@ export class AutoRunner {
     )
   }
 
+  private hasDiamondBudgetForRoom(room: VerifiedFudaiRoom): boolean {
+    if (!this.requiresFanBadge(room)) return true
+    const config = store.store
+    const stats = store.get('runStats')
+    const effectiveBudget = config.diamondBudget + (config.allowDiamondProfit ? stats.diamondWonAmount || 0 : 0)
+    return config.diamondUsed < effectiveBudget
+  }
+
+  private requiresFanBadge(room: VerifiedFudaiRoom): boolean {
+    return room.matchedSignals.includes('requires-fan-badge') || /粉丝团|灯牌|加入粉丝/.test(room.countdownText || '')
+  }
+
   private trimCandidatePool(): void {
     const rooms = this.getCandidateSnapshot()
     while (rooms.length > this.state.candidatePoolLimit) {
@@ -758,10 +788,12 @@ export class AutoRunner {
 
   private sortPendingVerify(): void {
     this.pendingVerify.sort((a, b) => {
-      if (a.remainingSeconds === null && b.remainingSeconds === null) return 0
-      if (a.remainingSeconds === null) return 1
-      if (b.remainingSeconds === null) return -1
-      return a.remainingSeconds - b.remainingSeconds
+      const left = a.remainingSeconds
+      const right = b.remainingSeconds
+      if (left === null && right === null) return 0
+      if (left === null) return 1
+      if (right === null) return -1
+      return left - right
     })
   }
 

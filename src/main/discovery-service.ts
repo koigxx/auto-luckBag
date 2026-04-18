@@ -623,9 +623,11 @@ export class DiscoveryService {
       const base = currentTime && currentTime > 0 ? currentTime : Date.now()
       const remainingSeconds = Math.floor((drawTime - base) / 1000)
       if (remainingSeconds > 0 && remainingSeconds <= 24 * 60 * 60) {
+        const serverNow = currentTime && currentTime > 0 ? currentTime : Date.now()
+        const clientServerOffset = Date.now() - serverNow
         return {
           remainingSeconds,
-          drawAt: Date.now() + remainingSeconds * 1000,
+          drawAt: drawTime + clientServerOffset,
           source: 'network',
           confidence: 'exact'
         }
