@@ -14,6 +14,7 @@ export interface AutoRunOptions {
   scanIntervalSeconds?: number
   stopAfterMinutes?: number
   enterBeforeSeconds?: number
+  candidatePoolLimit?: number
 }
 
 export type AutoRunStatus =
@@ -36,6 +37,7 @@ export interface AutoRunState {
   candidateCount: number
   pendingVerifyCount: number
   enterBeforeSeconds: number
+  candidatePoolLimit: number
   candidates: VerifiedFudaiRoom[]
   riskPausedUntil: number | null
   lastRiskReason: string
@@ -43,16 +45,19 @@ export interface AutoRunState {
 
 const DEFAULT_SOURCE_URL = ''
 const DEFAULT_SCAN_INTERVAL_SECONDS = 50
-const DEFAULT_ENTER_BEFORE_SECONDS = 120
+const MIN_ENTER_BEFORE_SECONDS = 180
+const DEFAULT_ENTER_BEFORE_SECONDS = 180
 const MAX_PENDING_VERIFY = 5
-const MAX_CANDIDATES = 20
+const MAX_CANDIDATES = 5
+const DEFAULT_CANDIDATE_POOL_LIMIT = 5
 const RISK_PAUSE_MS = 10 * 60 * 1000
 const CANDIDATE_TTL_MS = 30 * 60 * 1000
 const REJECTED_CANDIDATE_TTL_MS = 30 * 60 * 1000
 const VERIFY_DIRECT_ENTER_EXTRA_SECONDS = 15
 const AFTER_DRAW_RESUME_BUFFER_SECONDS = 20
 const RECHECK_CANDIDATE_TTL_MS = 8 * 60 * 1000
-const OPERATION_TIMEOUT_MS = 35_000
+const SCAN_OPERATION_TIMEOUT_MS = 75_000
+const VERIFY_OPERATION_TIMEOUT_MS = 150_000
 const DUE_ENTER_GUARD_SECONDS = 10
 
 interface RecheckCandidate {
@@ -85,6 +90,7 @@ export class AutoRunner {
     candidateCount: 0,
     pendingVerifyCount: 0,
     enterBeforeSeconds: DEFAULT_ENTER_BEFORE_SECONDS,
+    candidatePoolLimit: DEFAULT_CANDIDATE_POOL_LIMIT,
     candidates: [],
     riskPausedUntil: null,
     lastRiskReason: ''
@@ -120,8 +126,12 @@ export class AutoRunner {
       options.scanIntervalSeconds || store.get('scanIntervalSeconds') || DEFAULT_SCAN_INTERVAL_SECONDS
     )
     const enterBeforeSeconds = Math.max(
-      15,
+      MIN_ENTER_BEFORE_SECONDS,
       options.enterBeforeSeconds || store.get('enterBeforeSeconds') || DEFAULT_ENTER_BEFORE_SECONDS
+    )
+    const candidatePoolLimit = Math.min(
+      MAX_CANDIDATES,
+      Math.max(1, options.candidatePoolLimit || store.get('candidatePoolLimit') || DEFAULT_CANDIDATE_POOL_LIMIT)
     )
     const sourceUrl = options.sourceUrl?.trim() || DEFAULT_SOURCE_URL
     const startedAt = Date.now()
@@ -141,13 +151,14 @@ export class AutoRunner {
       candidateCount: 0,
       pendingVerifyCount: 0,
       enterBeforeSeconds,
+      candidatePoolLimit,
       candidates: [],
       riskPausedUntil: null,
       lastRiskReason: ''
     }
 
     this.statsService.markStarted()
-    this.log(`自动运行已启动：约每 ${scanIntervalSeconds} 秒验证 1 个候选，开奖前 ${enterBeforeSeconds} 秒进房`)
+    this.log(`自动运行已启动：约每 ${scanIntervalSeconds} 秒验证 1 个候选，开奖前 ${enterBeforeSeconds} 秒进房，候选池最多 ${candidatePoolLimit} 个`)
     this.emitUpdate()
 
     if (stopAt) {
@@ -313,7 +324,7 @@ export class AutoRunner {
         sourceUrl: this.state.sourceUrl || undefined,
         maxRooms: MAX_PENDING_VERIFY * 2
       }),
-      OPERATION_TIMEOUT_MS,
+      SCAN_OPERATION_TIMEOUT_MS,
       '扫描直播入口超时'
     )
     if (!scanResult.ok) {
@@ -358,7 +369,7 @@ export class AutoRunner {
       this.discoveryService.verifyRoom(candidate, {
         keepPageOnVerified: true
       }),
-      OPERATION_TIMEOUT_MS,
+      VERIFY_OPERATION_TIMEOUT_MS,
       `验证候选超时：${candidate.name || candidate.url}`
     )
     if (!verifyResult.ok) {
@@ -392,6 +403,14 @@ export class AutoRunner {
 
       const directEnterThreshold = this.state.enterBeforeSeconds + VERIFY_DIRECT_ENTER_EXTRA_SECONDS
       if (remainingSeconds !== null && remainingSeconds > 2 && remainingSeconds <= directEnterThreshold) {
+        const conflict = this.findDrawTimeConflict(result.room)
+        if (conflict) {
+          await this.closeVerificationPage(result)
+          this.log(
+            `临近开奖直播间与现有福袋开奖时间冲突，跳过直接停留：${result.room.name}，冲突=${conflict.name}，间隔=${conflict.diffSeconds}秒`
+          )
+          return 0
+        }
         if (!this.roomManager.hasCapacity()) {
           await this.closeVerificationPage(result)
           this.log('直播间监控数量已满，无法接管临近开奖候选')
@@ -426,6 +445,13 @@ export class AutoRunner {
       await this.closeVerificationPage(result)
       if (remainingSeconds !== null && remainingSeconds <= this.state.enterBeforeSeconds) {
         this.log(`候选已接近或错过提前进房窗口，未加入候选池：${result.room.name}，剩余=${remainingSeconds}秒`)
+        return 0
+      }
+      const conflict = this.findDrawTimeConflict(result.room)
+      if (conflict) {
+        this.log(
+          `候选与现有福袋开奖时间冲突，未加入候选池：${result.room.name}，冲突=${conflict.name}，间隔=${conflict.diffSeconds}秒`
+        )
         return 0
       }
       this.candidatePool.set(result.room.url, result.room)
@@ -610,6 +636,40 @@ export class AutoRunner {
     return false
   }
 
+  private findDrawTimeConflict(room: VerifiedFudaiRoom): { name: string; diffSeconds: number } | null {
+    const roomDrawAt = this.estimateDrawAt(room)
+    if (roomDrawAt === null) return null
+
+    for (const existing of this.candidatePool.values()) {
+      if (existing.url === room.url) continue
+      const existingDrawAt = this.estimateDrawAt(existing)
+      if (existingDrawAt === null) continue
+      const diffSeconds = Math.floor(Math.abs(roomDrawAt - existingDrawAt) / 1000)
+      if (diffSeconds < this.state.enterBeforeSeconds) {
+        return { name: existing.name, diffSeconds }
+      }
+    }
+
+    for (const existing of this.roomManager.getAllRooms()) {
+      if (existing.url === room.url) continue
+      if (typeof existing.remainingSeconds !== 'number' || existing.remainingSeconds <= 0) continue
+      const existingDrawAt = Date.now() + existing.remainingSeconds * 1000
+      const diffSeconds = Math.floor(Math.abs(roomDrawAt - existingDrawAt) / 1000)
+      if (diffSeconds < this.state.enterBeforeSeconds) {
+        return { name: existing.name, diffSeconds }
+      }
+    }
+
+    return null
+  }
+
+  private estimateDrawAt(room: VerifiedFudaiRoom): number | null {
+    if (typeof room.drawAt === 'number' && room.drawAt > Date.now()) return room.drawAt
+    const remainingSeconds = this.currentRemainingSeconds(room)
+    if (remainingSeconds === null || remainingSeconds <= 0) return null
+    return Date.now() + remainingSeconds * 1000
+  }
+
   private currentRemainingSeconds(room: VerifiedFudaiRoom): number | null {
     if (room.remainingSeconds === null) return null
     const elapsedSeconds = Math.floor((Date.now() - room.verifiedAt) / 1000)
@@ -689,7 +749,7 @@ export class AutoRunner {
 
   private trimCandidatePool(): void {
     const rooms = this.getCandidateSnapshot()
-    while (rooms.length > MAX_CANDIDATES) {
+    while (rooms.length > this.state.candidatePoolLimit) {
       const room = rooms.pop()
       if (!room) break
       this.candidatePool.delete(room.url)

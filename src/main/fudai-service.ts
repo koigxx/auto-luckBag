@@ -60,6 +60,7 @@ export class FudaiService {
   private handling = false
   private latestLotteryRight: LotteryRightInfo | null = null
   private lastGiftSendAt = 0
+  private lastFanBadgeGiftSendAt = 0
   private lastChatSendAt = 0
 
   constructor(page: Page, roomId: string, callbacks: FudaiCallbacks) {
@@ -104,6 +105,14 @@ export class FudaiService {
       if (!this.canWork()) return
       if (/\/webcast\/gift\/send\//.test(response.url())) {
         this.lastGiftSendAt = Date.now()
+        const request = response.request()
+        const postData = request.postData() || ''
+        const requestText = `${response.url()} ${postData}`
+        if (/gift_id=6937\b|gift_id%22%3A6937|点亮粉丝团|粉丝团灯牌|fansClub/i.test(requestText)) {
+          this.lastFanBadgeGiftSendAt = Date.now()
+        } else {
+          this.debugLog(`捕获到非粉丝灯牌礼物发送，已忽略: ${requestText.slice(0, 180)}`)
+        }
         return
       }
       if (/\/webcast\/room\/chat\//.test(response.url())) {
@@ -244,15 +253,16 @@ export class FudaiService {
       if (enrichedInfo.requiresFollow || enrichedInfo.requiresFanBadge) await this.handleFollowRequirement()
       if (!this.canWork()) return
 
-      if (enrichedInfo.requiresFanBadge) {
-        const badgeResult = await this.handleFanBadgeRequirement(enrichedInfo.fanBadgeCost)
-        if (!badgeResult) return
-      }
-      if (!this.canWork()) return
-
       if (enrichedInfo.requiresComment) {
         const commentResult = await this.handleCommentRequirement(enrichedInfo.commentText)
         if (!commentResult) return
+      }
+      if (!this.canWork()) return
+
+      if (enrichedInfo.requiresFanBadge) {
+        await this.refreshLotteryPanelAfterTask()
+        const badgeResult = await this.handleFanBadgeRequirement(enrichedInfo.fanBadgeCost)
+        if (!badgeResult) return
       }
       if (!this.canWork()) return
 
@@ -316,6 +326,16 @@ export class FudaiService {
       if (false && hasPanelSignal) return
       await this.page.waitForTimeout(400)
     }
+  }
+
+  private async refreshLotteryPanelAfterTask(): Promise<void> {
+    this.latestLotteryRight = null
+    const clicked = await this.clickVisibleFudaiIcon()
+    if (!clicked) {
+      this.debugLog('评论后未能重新点击福袋入口，继续使用当前弹窗查找粉丝团按钮')
+      return
+    }
+    await this.waitForLotteryPanelOrRightInfo(5000)
   }
 
   private async clickVisibleFudaiIcon(): Promise<boolean> {
@@ -478,8 +498,9 @@ export class FudaiService {
     const target = await this.page
       .evaluate(() => {
         const viewportArea = Math.max(1, window.innerWidth * window.innerHeight)
-        const keywords = ['确认', '确定', '支付', '点亮', '赠送', '送出', '开通']
-        const contextKeywords = /粉丝团|灯牌|点亮|钻|抖币|支付|确认/
+        const keywords = ['确认点亮', '确认加入', '确认开通', '点亮粉丝团', '粉丝团点亮', '加入粉丝团', '开通粉丝团']
+        const contextKeywords = /粉丝团|灯牌|点亮粉丝团|粉丝团点亮|加入粉丝团|开通粉丝团/
+        const ordinaryGiftText = /小心心|热气球|跑车|比心兔兔|人气票|Thuglife|春日蝶舞|亲吻|闪耀星辰|大啤酒|玫瑰|抖音|QQ|WW|EE/
         const isVisible = (element: Element) => {
           const style = window.getComputedStyle(element)
           const rect = element.getBoundingClientRect()
@@ -511,14 +532,26 @@ export class FudaiService {
             const rect = element.getBoundingClientRect()
             const text = normalize(element.textContent || '')
             const ctx = contextText(element)
+            const isOrdinaryGiftCell =
+              ordinaryGiftText.test(text) ||
+              (/^\d+\s*钻(?:石)?/.test(text) && /赠送|送出/.test(text) && !/粉丝团|灯牌|点亮/.test(text))
+            const hasFanBadgeContext = contextKeywords.test(ctx) || contextKeywords.test(text)
+            const isActionButton =
+              /加入粉丝团\s*[（(]\s*\d+\s*钻(?:石)?\s*[）)]|点亮粉丝团\s*[（(]\s*\d+\s*钻(?:石)?\s*[）)]|确认|确定|支付|开通|点亮/.test(text)
+            const isStatusLabel = /未达成|参与条件|倒计时/.test(text) && !isActionButton
             const score =
-              (keywords.some((keyword) => text.includes(keyword)) ? 10 : 0) +
-              (/确认|确定|支付|赠送|送出/.test(text) ? 8 : 0) +
-              (contextKeywords.test(ctx) ? 4 : 0) -
-              (text.includes('加入粉丝团') && !/确认|支付|点亮|赠送|送出/.test(text) ? 8 : 0)
-            return { element, rect, text, area: rect.width * rect.height, score }
+              (isActionButton ? 30 : 0) +
+              (keywords.some((keyword) => text.includes(keyword)) ? 12 : 0) +
+              (/确认|确定|支付|点亮|开通/.test(text) ? 6 : 0) +
+              (hasFanBadgeContext ? 8 : 0) -
+              (isOrdinaryGiftCell ? 100 : 0) -
+              (isStatusLabel ? 100 : 0) -
+              (text === '加入粉丝团' || text === '点亮灯牌' ? 20 : 0)
+            return { element, rect, text, area: rect.width * rect.height, score, hasFanBadgeContext, isOrdinaryGiftCell, isActionButton }
           })
-          .filter(({ element, text, score }) => text && score > 0 && isVisible(element))
+          .filter(({ element, text, score, hasFanBadgeContext, isOrdinaryGiftCell, isActionButton }) =>
+            text && score > 0 && hasFanBadgeContext && !isOrdinaryGiftCell && isActionButton && isVisible(element)
+          )
           .sort((a, b) => b.score - a.score || a.area - b.area)
 
         ;(window as any).__luckBagDebugCandidates = candidates.slice(0, 8).map(({ rect, text, area, score }) => ({
@@ -548,13 +581,13 @@ export class FudaiService {
   private async waitForFanBadgeSatisfied(timeoutMs: number): Promise<boolean> {
     const startedAt = Date.now()
     while (Date.now() - startedAt < timeoutMs && this.canWork()) {
-      if (this.lastGiftSendAt >= startedAt) return true
+      if (this.lastFanBadgeGiftSendAt >= startedAt) return true
       if (this.latestLotteryRight && !this.latestLotteryRight.requiresFanBadge) return true
 
       const satisfied = await this.page
         .evaluate(() => {
           const text = (document.body.innerText || '').replace(/\s+/g, ' ')
-          if (/已加入粉丝团|已点亮|已满足|已达成|已参与|等待开奖/.test(text)) return true
+          if (/已加入粉丝团|已点亮粉丝团|粉丝团灯牌.*已达成|点亮粉丝团.*已达成|加入粉丝团.*已达成/.test(text)) return true
           if (/加入粉丝团\s*已达成|点亮灯牌\s*已达成|粉丝团点亮\s*已达成/.test(text)) return true
           return false
         })
@@ -584,13 +617,7 @@ export class FudaiService {
 
   private async clickFanBadgeEntry(): Promise<boolean> {
     const beforeUrl = this.page.url()
-    const clicked = await this.clickVisibleTextAction({
-      keywords: ['加入粉丝团', '点亮灯牌', '粉丝团点亮', '加灯牌', '去点亮', '开通粉丝团'],
-      exact: false,
-      requireLotteryContext: true,
-      maxAreaRatio: 0.35,
-      logLabel: '加入粉丝团/点亮灯牌'
-    })
+    const clicked = await this.clickLotteryFanBadgeAction()
     if (clicked) {
       await this.page.waitForTimeout(500).catch(() => {})
       if (this.page.url() !== beforeUrl) {
@@ -604,6 +631,88 @@ export class FudaiService {
     }
 
     return false
+  }
+
+  private async clickLotteryFanBadgeAction(): Promise<boolean> {
+    const target = await this.page
+      .evaluate(() => {
+        const viewportArea = Math.max(1, window.innerWidth * window.innerHeight)
+        const normalize = (text: string) => text.replace(/\s+/g, ' ').trim()
+        const isVisible = (element: Element) => {
+          const style = window.getComputedStyle(element)
+          const rect = element.getBoundingClientRect()
+          return (
+            style.display !== 'none' &&
+            style.visibility !== 'hidden' &&
+            Number(style.opacity || 1) > 0.05 &&
+            rect.width >= 8 &&
+            rect.height >= 8 &&
+            rect.bottom > 0 &&
+            rect.right > 0 &&
+            rect.top < window.innerHeight &&
+            rect.left < window.innerWidth &&
+            (rect.width * rect.height) / viewportArea <= 0.35
+          )
+        }
+        const contextText = (element: Element) => {
+          let current: Element | null = element
+          const parts: string[] = []
+          for (let depth = 0; current && depth < 8; depth++) {
+            parts.push(normalize(current.textContent || ''))
+            current = current.parentElement
+          }
+          return parts.join(' ')
+        }
+        const candidates = Array.from(document.querySelectorAll('button, [role="button"], div, span, p'))
+          .map((element) => {
+            const rect = element.getBoundingClientRect()
+            const text = normalize(element.textContent || '')
+            const ctx = contextText(element)
+            const inLotteryTask = /福袋|参与条件|发送评论|倒计时/.test(ctx)
+            const isAction =
+              /加入粉丝团\s*[（(]\s*\d+\s*钻(?:石)?\s*[）)]|点亮粉丝团\s*[（(]\s*\d+\s*钻(?:石)?\s*[）)]|加入粉丝团|点亮灯牌|粉丝团点亮/.test(text)
+            const isStatusOnly = /未达成|参与条件|发送评论|倒计时/.test(text) && !/[（(]\s*\d+\s*钻(?:石)?\s*[）)]/.test(text)
+            const isHeaderCard = rect.top < 170 && /酷炫勋章|专属礼物|进场特效|加会员/.test(ctx)
+            const score =
+              (/[（(]\s*\d+\s*钻(?:石)?\s*[）)]/.test(text) ? 50 : 0) +
+              (/加入粉丝团|点亮粉丝团|点亮灯牌|粉丝团点亮/.test(text) ? 20 : 0) +
+              (inLotteryTask ? 20 : 0) +
+              (rect.height >= 28 ? 8 : 0) -
+              (isStatusOnly ? 80 : 0) -
+              (isHeaderCard ? 80 : 0) -
+              (text === '加入粉丝团' || text === '点亮灯牌' ? 10 : 0)
+            return { element, rect, text, area: rect.width * rect.height, score, isAction, inLotteryTask, isStatusOnly, isHeaderCard }
+          })
+          .filter(({ element, text, score, isAction, inLotteryTask, isStatusOnly, isHeaderCard }) =>
+            text && score > 0 && isAction && inLotteryTask && !isStatusOnly && !isHeaderCard && isVisible(element)
+          )
+          .sort((a, b) => b.score - a.score || b.area - a.area)
+
+        ;(window as any).__luckBagDebugCandidates = candidates.slice(0, 8).map(({ rect, text, area, score }) => ({
+          text: text.slice(0, 80),
+          x: Math.round(rect.left),
+          y: Math.round(rect.top),
+          w: Math.round(rect.width),
+          h: Math.round(rect.height),
+          area: Math.round(area),
+          score
+        }))
+
+        const node = candidates[0]?.element
+        if (!node) return null
+        const rect = node.getBoundingClientRect()
+        return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, text: normalize(node.textContent || '') }
+      })
+      .catch(() => null)
+
+    if (!target) {
+      await this.logDebugCandidates('加入粉丝团/点亮灯牌')
+      return false
+    }
+    await this.logDebugCandidates('加入粉丝团/点亮灯牌')
+    await this.page.mouse.click(target.x, target.y)
+    this.callbacks.onLog(`已点击加入粉丝团/点亮灯牌: ${target.text.slice(0, 30)}`)
+    return true
   }
 
   private async handleFanBadgeRequirement(cost: number): Promise<boolean> {
@@ -622,7 +731,12 @@ export class FudaiService {
     }
 
     await this.randomDelay(600, 1000)
-    await this.clickFanBadgeConfirm()
+    const confirmed = await this.clickFanBadgeConfirm()
+    if (!confirmed) {
+      this.callbacks.onFudaiSkipped('未找到明确的粉丝团/灯牌确认按钮，已避免误送普通礼物')
+      this.failureCooldownUntil = Date.now() + FAILURE_COOLDOWN_MS
+      return false
+    }
 
     const verified = await this.waitForFanBadgeSatisfied(7000)
     if (!verified) {

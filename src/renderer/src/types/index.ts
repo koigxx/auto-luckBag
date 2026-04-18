@@ -36,6 +36,7 @@ export interface AppConfig {
   debugLogs: boolean
   scanIntervalSeconds: number
   enterBeforeSeconds: number
+  candidatePoolLimit: number
   rooms: { id: string; url: string; name: string }[]
   preferredRooms: { id: string; url: string; name: string }[]
   runStats: RunStats
@@ -93,6 +94,7 @@ export interface AutoRunState {
   candidateCount: number
   pendingVerifyCount: number
   enterBeforeSeconds: number
+  candidatePoolLimit: number
   candidates: VerifiedFudaiRoom[]
   riskPausedUntil: number | null
   lastRiskReason: string

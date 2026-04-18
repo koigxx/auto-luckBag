@@ -31,6 +31,7 @@ export interface AppConfig {
   debugLogs: boolean
   scanIntervalSeconds: number
   enterBeforeSeconds: number
+  candidatePoolLimit: number
   rooms: RoomConfig[]
   preferredRooms: RoomConfig[]
   runStats: RunStats
@@ -49,7 +50,8 @@ const defaults: AppConfig = {
   autoFollow: true,
   debugLogs: false,
   scanIntervalSeconds: 50,
-  enterBeforeSeconds: 120,
+  enterBeforeSeconds: 180,
+  candidatePoolLimit: 5,
   rooms: [],
   preferredRooms: [],
   runStats: {

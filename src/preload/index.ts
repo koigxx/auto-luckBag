@@ -33,6 +33,7 @@ const api = {
       scanIntervalSeconds?: number
       stopAfterMinutes?: number
       enterBeforeSeconds?: number
+      candidatePoolLimit?: number
     }) => ipcRenderer.invoke('autoRun:start', options),
     stop: () => ipcRenderer.invoke('autoRun:stop'),
     status: () => ipcRenderer.invoke('autoRun:status')

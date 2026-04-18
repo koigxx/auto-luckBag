@@ -170,6 +170,7 @@ export function useIpc() {
     scanIntervalSeconds?: number
     stopAfterMinutes?: number
     enterBeforeSeconds?: number
+    candidatePoolLimit?: number
   }) {
     const now = Date.now()
     autoRunState.value = {
@@ -183,7 +184,8 @@ export function useIpc() {
       nextScanAt: now,
       candidateCount: autoRunState.value?.candidateCount || 0,
       pendingVerifyCount: autoRunState.value?.pendingVerifyCount || 0,
-      enterBeforeSeconds: options.enterBeforeSeconds || 120,
+      enterBeforeSeconds: options.enterBeforeSeconds || 180,
+      candidatePoolLimit: Math.min(5, Math.max(1, options.candidatePoolLimit || 5)),
       candidates: autoRunState.value?.candidates || [],
       riskPausedUntil: autoRunState.value?.riskPausedUntil || null,
       lastRiskReason: autoRunState.value?.lastRiskReason || ''

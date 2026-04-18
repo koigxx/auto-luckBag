@@ -30,6 +30,7 @@ export interface API {
       scanIntervalSeconds?: number
       stopAfterMinutes?: number
       enterBeforeSeconds?: number
+      candidatePoolLimit?: number
     }) => Promise<{
       success: boolean
       state: import('./index').AutoRunState

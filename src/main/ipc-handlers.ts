@@ -174,6 +174,7 @@ export function setupIpcHandlers(
         scanIntervalSeconds?: number
         stopAfterMinutes?: number
         enterBeforeSeconds?: number
+        candidatePoolLimit?: number
       }
     ) => {
       try {
