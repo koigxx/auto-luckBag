@@ -183,7 +183,7 @@ export function useIpc() {
       nextScanAt: now,
       candidateCount: autoRunState.value?.candidateCount || 0,
       pendingVerifyCount: autoRunState.value?.pendingVerifyCount || 0,
-      enterBeforeSeconds: options.enterBeforeSeconds || 25,
+      enterBeforeSeconds: options.enterBeforeSeconds || 120,
       candidates: autoRunState.value?.candidates || [],
       riskPausedUntil: autoRunState.value?.riskPausedUntil || null,
       lastRiskReason: autoRunState.value?.lastRiskReason || ''

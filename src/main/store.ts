@@ -28,9 +28,11 @@ export interface AppConfig {
   diamondBudget: number
   diamondUsed: number
   autoFollow: boolean
+  debugLogs: boolean
   scanIntervalSeconds: number
   enterBeforeSeconds: number
   rooms: RoomConfig[]
+  preferredRooms: RoomConfig[]
   runStats: RunStats
 }
 
@@ -45,9 +47,11 @@ const defaults: AppConfig = {
   diamondBudget: 10,
   diamondUsed: 0,
   autoFollow: true,
+  debugLogs: false,
   scanIntervalSeconds: 50,
-  enterBeforeSeconds: 25,
+  enterBeforeSeconds: 120,
   rooms: [],
+  preferredRooms: [],
   runStats: {
     participated: 0,
     physicalWins: 0,

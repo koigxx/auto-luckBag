@@ -65,8 +65,6 @@ const VERIFY_MAX_REASONABLE_REMAINING_SECONDS = 15 * 60
 const FUDAI_ENTRY_SELECTOR = [
   '[class*="luck-bag"]',
   '[class*="luckbag"]',
-  '[class*="red-pocket"]',
-  '[class*="redpacket"]',
   '[class*="fudai"]',
   '[class*="lottery"]',
   '[data-e2e*="luck"]',
@@ -321,6 +319,19 @@ export class DiscoveryService {
     this.verifyingPages.clear()
     if (this.page && !this.page.isClosed()) await this.page.close()
     this.page = null
+  }
+
+  async closeCurrentPage(): Promise<void> {
+    const verifyingPage = Array.from(this.verifyingPages).at(-1)
+    if (verifyingPage && !verifyingPage.isClosed()) {
+      await verifyingPage.close().catch(() => {})
+      this.verifyingPages.delete(verifyingPage)
+      return
+    }
+    if (this.page && !this.page.isClosed()) {
+      await this.page.close().catch(() => {})
+      this.page = null
+    }
   }
 
   private async getPage(): Promise<Page> {
@@ -698,14 +709,14 @@ export class DiscoveryService {
   }
 
   private hasFudaiNetworkContext(text: string): boolean {
-    if (/福袋|超级福袋|粉丝福袋|fudai|luck_bag|lucky_bag|luckybag|lottery|redpacket|red_packet/i.test(text)) return true
+    if (/福袋|超级福袋|粉丝福袋|fudai|luck_bag|lucky_bag|luckybag|lottery/i.test(text)) return true
     const hasDrawContext = /抽奖|开奖|draw|award|prize/i.test(text)
     const hasTaskContext = /口令|评论|粉丝团|灯牌|关注主播|加入粉丝团|participate|follow|fans/i.test(text)
     return hasDrawContext && hasTaskContext
   }
 
   private hasStrongFudaiNetworkContext(text: string): boolean {
-    return /福袋|超级福袋|粉丝福袋|fudai|luck_bag|lucky_bag|luckybag|lottery|redpacket|red_packet/i.test(text)
+    return /福袋|超级福袋|粉丝福袋|fudai|luck_bag|lucky_bag|luckybag|lottery/i.test(text)
   }
 
   private scoreSignals(signals: string[], remainingSeconds: number | null): number {

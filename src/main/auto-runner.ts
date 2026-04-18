@@ -43,7 +43,7 @@ export interface AutoRunState {
 
 const DEFAULT_SOURCE_URL = ''
 const DEFAULT_SCAN_INTERVAL_SECONDS = 50
-const DEFAULT_ENTER_BEFORE_SECONDS = 25
+const DEFAULT_ENTER_BEFORE_SECONDS = 120
 const MAX_PENDING_VERIFY = 5
 const MAX_CANDIDATES = 20
 const RISK_PAUSE_MS = 10 * 60 * 1000
@@ -52,6 +52,8 @@ const REJECTED_CANDIDATE_TTL_MS = 30 * 60 * 1000
 const VERIFY_DIRECT_ENTER_EXTRA_SECONDS = 15
 const AFTER_DRAW_RESUME_BUFFER_SECONDS = 20
 const RECHECK_CANDIDATE_TTL_MS = 8 * 60 * 1000
+const OPERATION_TIMEOUT_MS = 35_000
+const DUE_ENTER_GUARD_SECONDS = 10
 
 interface RecheckCandidate {
   room: DiscoveredRoom
@@ -70,6 +72,7 @@ export class AutoRunner {
   private recheckQueue: RecheckCandidate[] = []
   private rejectedUntil: Map<string, number> = new Map()
   private candidatePool: Map<string, VerifiedFudaiRoom> = new Map()
+  private lastActiveRoomWaitLogAt = 0
   private state: AutoRunState = {
     running: false,
     status: 'stopped',
@@ -222,10 +225,21 @@ export class AutoRunner {
     try {
       this.prunePools()
 
-      if (this.roomManager.getAllRooms().length > 0) {
+      if (this.pauseForActiveRoom()) return
+      if (false && this.roomManager.getAllRooms().length > 0) {
+        if (Date.now() - this.lastActiveRoomWaitLogAt > 30_000) {
+          this.lastActiveRoomWaitLogAt = Date.now()
+          this.log('已有直播间正在处理或等待开奖，暂停新的扫描、验证和进房')
+        }
+        this.setStatus('waiting')
+        this.scheduleNext(1)
+        return
+      }
+      this.lastActiveRoomWaitLogAt = 0
+      if (false && this.roomManager.getAllRooms().length > 0) {
         this.setStatus('waiting')
         this.log('已有直播间正在处理或等待开奖，暂停新的扫描、验证和进房')
-        this.scheduleNext(5)
+        this.scheduleNext(1)
         return
       }
 
@@ -244,10 +258,10 @@ export class AutoRunner {
         return
       }
 
-      if (this.hasDueSoonCandidate()) {
+      if (this.hasPendingEnterWindow()) {
         this.setStatus('waiting')
         this.log('候选接近开奖，暂停新的扫描和验证')
-        this.scheduleNext(5)
+        this.scheduleNext(1)
         return
       }
 
@@ -256,13 +270,16 @@ export class AutoRunner {
       if (this.pendingVerify.length === 0) {
         await this.scanForCandidates()
         if (!this.state.running) return
+        if (this.pauseForActiveRoom()) return
       } else {
         this.log(`待验证队列还有 ${this.pendingVerify.length} 个候选，本轮不重复扫描入口页`)
       }
 
-      if (!this.hasDueSoonCandidate()) {
+      if (!this.hasPendingEnterWindow()) {
+        if (this.pauseForActiveRoom()) return
         const waitAfterVerifySeconds = await this.verifyNextCandidate()
         if (!this.state.running) return
+        if (this.pauseForActiveRoom()) return
         if (waitAfterVerifySeconds > 0) {
           this.scheduleNext(waitAfterVerifySeconds)
           return
@@ -291,13 +308,24 @@ export class AutoRunner {
     this.emitUpdate()
 
     logInfo('auto-run', `scan source=${this.state.sourceUrl || 'default'}`)
-    const discoveredRooms = await this.discoveryService.scan({
-      sourceUrl: this.state.sourceUrl || undefined,
-      maxRooms: MAX_PENDING_VERIFY * 2
-    })
+    const scanResult = await this.withTimeout(
+      this.discoveryService.scan({
+        sourceUrl: this.state.sourceUrl || undefined,
+        maxRooms: MAX_PENDING_VERIFY * 2
+      }),
+      OPERATION_TIMEOUT_MS,
+      '扫描直播入口超时'
+    )
+    if (!scanResult.ok) {
+      this.log(`${scanResult.message}，本轮跳过扫描`)
+      await this.discoveryService.closeCurrentPage().catch(() => {})
+      return
+    }
+    const discoveredRooms = scanResult.value
     if (!this.state.running) return
 
     const now = Date.now()
+    const preferredUrls = new Set((store.get('preferredRooms') || []).map((room) => room.url))
     const newRooms = discoveredRooms.filter(
       (room) =>
         !this.roomManager.hasRoom(room.url) &&
@@ -305,7 +333,7 @@ export class AutoRunner {
         !this.pendingVerify.some((pending) => pending.url === room.url) &&
         !this.recheckQueue.some((pending) => pending.room.url === room.url) &&
         (this.rejectedUntil.get(room.url) || 0) <= now
-    )
+    ).sort((a, b) => Number(preferredUrls.has(b.url)) - Number(preferredUrls.has(a.url)))
 
     for (const room of newRooms) {
       if (this.pendingVerify.length >= MAX_PENDING_VERIFY) break
@@ -326,9 +354,20 @@ export class AutoRunner {
     }
 
     this.setStatus('verifying')
-    const result: VerifyRoomResult = await this.discoveryService.verifyRoom(candidate, {
-      keepPageOnVerified: true
-    })
+    const verifyResult = await this.withTimeout(
+      this.discoveryService.verifyRoom(candidate, {
+        keepPageOnVerified: true
+      }),
+      OPERATION_TIMEOUT_MS,
+      `验证候选超时：${candidate.name || candidate.url}`
+    )
+    if (!verifyResult.ok) {
+      await this.discoveryService.closeCurrentPage().catch(() => {})
+      this.rejectedUntil.set(candidate.url, Date.now() + REJECTED_CANDIDATE_TTL_MS)
+      this.log(`${verifyResult.message}，候选冷却 30 分钟`)
+      return 0
+    }
+    const result: VerifyRoomResult = verifyResult.value
     if (!this.state.running) {
       await this.closeVerificationPage(result)
       return 0
@@ -352,7 +391,7 @@ export class AutoRunner {
       }
 
       const directEnterThreshold = this.state.enterBeforeSeconds + VERIFY_DIRECT_ENTER_EXTRA_SECONDS
-      if (remainingSeconds !== null && remainingSeconds <= directEnterThreshold) {
+      if (remainingSeconds !== null && remainingSeconds > 2 && remainingSeconds <= directEnterThreshold) {
         if (!this.roomManager.hasCapacity()) {
           await this.closeVerificationPage(result)
           this.log('直播间监控数量已满，无法接管临近开奖候选')
@@ -385,6 +424,10 @@ export class AutoRunner {
       }
 
       await this.closeVerificationPage(result)
+      if (remainingSeconds !== null && remainingSeconds <= this.state.enterBeforeSeconds) {
+        this.log(`候选已接近或错过提前进房窗口，未加入候选池：${result.room.name}，剩余=${remainingSeconds}秒`)
+        return 0
+      }
       this.candidatePool.set(result.room.url, result.room)
       this.trimCandidatePool()
       this.log(`已记录候选：${result.room.name}，剩余=${result.room.remainingSeconds ?? '未知'}秒，score=${result.room.score}`)
@@ -400,7 +443,7 @@ export class AutoRunner {
   private async enterDueRooms(): Promise<number> {
     const dueRooms = this.getCandidateSnapshot().filter((room) => {
       const remainingSeconds = this.currentRemainingSeconds(room)
-      return remainingSeconds !== null && remainingSeconds <= this.state.enterBeforeSeconds
+      return remainingSeconds !== null && remainingSeconds > 2 && remainingSeconds <= this.state.enterBeforeSeconds
     })
 
     if (dueRooms.length === 0) return 0
@@ -456,6 +499,42 @@ export class AutoRunner {
     this.timer = setTimeout(() => {
       void this.runCycle()
     }, normalizedDelaySeconds * 1000)
+  }
+
+  private pauseForActiveRoom(): boolean {
+    if (this.roomManager.getAllRooms().length === 0) {
+      this.lastActiveRoomWaitLogAt = 0
+      return false
+    }
+
+    if (Date.now() - this.lastActiveRoomWaitLogAt > 30_000) {
+      this.lastActiveRoomWaitLogAt = Date.now()
+      this.log('已有直播间正在处理或等待开奖，暂停新的扫描、验证和进房')
+    }
+    this.setStatus('waiting')
+    this.scheduleNext(5)
+    return true
+  }
+
+  private async withTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    message: string
+  ): Promise<{ ok: true; value: T } | { ok: false; message: string }> {
+    let timer: NodeJS.Timeout | null = null
+    try {
+      const value = await Promise.race([
+        promise,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(message)), timeoutMs)
+        })
+      ])
+      return { ok: true, value }
+    } catch (e: any) {
+      return { ok: false, message: e?.message || message }
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
   }
 
   private getNextCycleDelaySeconds(defaultDelaySeconds: number): number {
@@ -517,15 +596,18 @@ export class AutoRunner {
     return Boolean(this.state.riskPausedUntil && this.state.riskPausedUntil > Date.now())
   }
 
-  private hasDueSoonCandidate(): boolean {
-    return this.getCandidateSnapshot().some((room) => {
+  private hasPendingEnterWindow(): boolean {
+    for (const room of this.candidatePool.values()) {
       const remainingSeconds = this.currentRemainingSeconds(room)
-      return (
-        remainingSeconds !== null &&
-        remainingSeconds <= this.state.enterBeforeSeconds + 10 &&
-        remainingSeconds > this.state.enterBeforeSeconds
-      )
-    })
+      if (remainingSeconds === null) continue
+
+      const secondsUntilEnter = remainingSeconds - this.state.enterBeforeSeconds
+      if (secondsUntilEnter > 0 && secondsUntilEnter <= DUE_ENTER_GUARD_SECONDS) {
+        return true
+      }
+    }
+
+    return false
   }
 
   private currentRemainingSeconds(room: VerifiedFudaiRoom): number | null {

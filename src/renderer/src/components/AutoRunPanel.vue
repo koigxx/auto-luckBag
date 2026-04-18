@@ -22,7 +22,7 @@ const emit = defineEmits<{
 
 const sourceUrl = ref('')
 const scanIntervalSeconds = ref(50)
-const enterBeforeSeconds = ref(25)
+const enterBeforeSeconds = ref(120)
 const stopAfterMinutes = ref<number | null>(null)
 
 function handleStart() {
@@ -82,8 +82,8 @@ function formatRemaining(seconds: number | null | undefined): string {
         <input
           v-model.number="enterBeforeSeconds"
           type="number"
-          min="15"
-          step="5"
+          min="60"
+          step="10"
           :disabled="state?.running"
         />
       </label>

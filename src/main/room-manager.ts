@@ -252,6 +252,7 @@ export class RoomManager {
       },
       onFanBadgeAdded: (cost) => {
         room.hasFanBadge = true
+        this.recordPreferredRoom(room)
         this.log(room.id, `已加入粉丝团，花费 ${cost} 钻石`)
         this.notifyUpdate(room)
       },
@@ -286,6 +287,15 @@ export class RoomManager {
     timer.unref?.()
     this.autoCloseTimers.set(roomId, timer)
     this.log(roomId, `已安排开奖后自动关闭，约 ${delaySeconds} 秒后执行`)
+  }
+
+  private recordPreferredRoom(room: Room): void {
+    const preferredRooms = store.get('preferredRooms') || []
+    const nextRooms = [
+      { id: room.id, url: room.url, name: room.name },
+      ...preferredRooms.filter((item) => item.url !== room.url)
+    ].slice(0, 50)
+    store.set('preferredRooms', nextRooms)
   }
 
   private toPublicRoom(room: Room): Omit<Room, 'page' | 'fudaiService'> {

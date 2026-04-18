@@ -84,6 +84,17 @@ function updateBudget(value: string) {
         <label>{{ t('autoFollow') }}</label>
         <span class="enabled-tag">{{ t('enabled') }}</span>
       </div>
+      <div class="config-item">
+        <label>{{ t('debugLogs') }}</label>
+        <label class="checkbox-label">
+          <input
+            type="checkbox"
+            :checked="config.debugLogs"
+            @change="emit('update', { debugLogs: ($event.target as HTMLInputElement).checked })"
+          />
+          {{ config.debugLogs ? t('enabled') : '-' }}
+        </label>
+      </div>
     </div>
   </div>
 </template>

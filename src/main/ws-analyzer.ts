@@ -91,7 +91,7 @@ function extractFudaiInfo(data: any, method: string): FudaiInfo {
 }
 
 function hasFudaiSignal(text: string): boolean {
-  return /福袋|超级福袋|粉丝福袋|luck.?bag|red.?pocket|lottery/i.test(text)
+  return /福袋|超级福袋|粉丝福袋|luck.?bag|lottery/i.test(text)
 }
 
 function detectType(text: string): FudaiInfo['type'] {

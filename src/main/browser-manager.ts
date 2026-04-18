@@ -30,7 +30,7 @@ export class BrowserManager {
     if (!this.browser || !this.browser.isConnected()) {
       this.browser = await chromium.launch({
         headless: false,
-        args: ['--no-sandbox']
+        args: ['--no-sandbox', '--window-size=1440,900']
       })
     }
     return this.browser
@@ -40,7 +40,7 @@ export class BrowserManager {
     if (!this.context) {
       const browser = await this.getBrowser()
       this.context = await browser.newContext({
-        viewport: { width: 1280, height: 800 },
+        viewport: { width: 1440, height: 900 },
         locale: 'zh-CN',
         storageState:
           this.storageStatePath && fs.existsSync(this.storageStatePath)

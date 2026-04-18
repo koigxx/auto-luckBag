@@ -33,9 +33,11 @@ export interface AppConfig {
   diamondBudget: number
   diamondUsed: number
   autoFollow: boolean
+  debugLogs: boolean
   scanIntervalSeconds: number
   enterBeforeSeconds: number
   rooms: { id: string; url: string; name: string }[]
+  preferredRooms: { id: string; url: string; name: string }[]
   runStats: RunStats
 }
 

@@ -31,8 +31,6 @@ const SELECTORS = {
   fudaiIcon: [
     '[class*="luck-bag"]',
     '[class*="luckbag"]',
-    '[class*="red-pocket"]',
-    '[class*="redpacket"]',
     '[class*="fudai"]',
     '[class*="lottery"]',
     '[data-e2e*="luck"]',
@@ -61,6 +59,8 @@ export class FudaiService {
   private participatedCooldownUntil = 0
   private handling = false
   private latestLotteryRight: LotteryRightInfo | null = null
+  private lastGiftSendAt = 0
+  private lastChatSendAt = 0
 
   constructor(page: Page, roomId: string, callbacks: FudaiCallbacks) {
     this.page = page
@@ -102,6 +102,14 @@ export class FudaiService {
   private setupLotteryResponseListener(): void {
     this.page.on('response', async (response) => {
       if (!this.canWork()) return
+      if (/\/webcast\/gift\/send\//.test(response.url())) {
+        this.lastGiftSendAt = Date.now()
+        return
+      }
+      if (/\/webcast\/room\/chat\//.test(response.url())) {
+        this.lastChatSendAt = Date.now()
+        return
+      }
       if (!/\/webcast\/lottery\//.test(response.url())) return
       const text = await response.text().catch(() => '')
       if (!text) return
@@ -220,7 +228,12 @@ export class FudaiService {
       }
 
       await this.waitForLotteryPanelOrRightInfo(6000)
-      if (!this.latestLotteryRight) this.latestLotteryRight = previousLotteryRight
+      if (!this.latestLotteryRight && previousLotteryRight && source === 'websocket') this.latestLotteryRight = previousLotteryRight
+      if (!this.latestLotteryRight) {
+        this.callbacks.onFudaiSkipped('未获取到福袋任务接口，可能点击到普通红包或非福袋入口')
+        this.failureCooldownUntil = Date.now() + FAILURE_COOLDOWN_MS
+        return
+      }
       if (!this.canWork()) return
 
       const enrichedInfo = await this.enrichInfoFromPage(info)
@@ -228,7 +241,7 @@ export class FudaiService {
       this.callbacks.onLog(
         `准备执行福袋任务：关注=${enrichedInfo.requiresFollow ? '是' : '否'}，粉丝团=${enrichedInfo.requiresFanBadge ? '是' : '否'}，评论=${enrichedInfo.requiresComment ? '是' : '否'}，口令=${enrichedInfo.commentText || '无'}`
       )
-      if (enrichedInfo.requiresFollow) await this.handleFollowRequirement()
+      if (enrichedInfo.requiresFollow || enrichedInfo.requiresFanBadge) await this.handleFollowRequirement()
       if (!this.canWork()) return
 
       if (enrichedInfo.requiresFanBadge) {
@@ -237,7 +250,10 @@ export class FudaiService {
       }
       if (!this.canWork()) return
 
-      if (enrichedInfo.requiresComment) await this.handleCommentRequirement(enrichedInfo.commentText)
+      if (enrichedInfo.requiresComment) {
+        const commentResult = await this.handleCommentRequirement(enrichedInfo.commentText)
+        if (!commentResult) return
+      }
       if (!this.canWork()) return
 
       await this.clickParticipate(enrichedInfo)
@@ -297,7 +313,7 @@ export class FudaiService {
       const hasPanelSignal = await this.page
         .evaluate(() => /立即参与|参与|已参与|口令|评论|关注|粉丝团|灯牌|等待开奖/.test(document.body.innerText || ''))
         .catch(() => false)
-      if (hasPanelSignal) return
+      if (false && hasPanelSignal) return
       await this.page.waitForTimeout(400)
     }
   }
@@ -306,22 +322,54 @@ export class FudaiService {
     const handles = await this.page.locator(SELECTORS.fudaiIcon).elementHandles().catch(() => [])
     for (const handle of handles) {
       if (!(await this.isElementVisible(handle))) continue
+      if (!(await this.isLikelyFudaiEntry(handle))) continue
+      const beforeUrl = this.page.url()
       try {
         await handle.click({ timeout: 3000 })
+        await this.page.waitForTimeout(300).catch(() => {})
+        if (this.page.url() !== beforeUrl) {
+          this.callbacks.onLog('点击福袋入口后页面发生跳转，尝试返回直播间')
+          await this.page.goBack({ waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {})
+          return false
+        }
         this.callbacks.onLog('已点击可见福袋入口')
         return true
       } catch (e: any) {
-        try {
-          await handle.click({ timeout: 1000, force: true })
-          this.callbacks.onLog('已强制点击可见福袋入口')
-          return true
-        } catch (forceError: any) {
-          this.callbacks.onLog(`点击可见福袋入口失败: ${forceError.message || e.message}`)
-        }
+        this.debugLog(`点击福袋入口失败，跳过强制点击: ${e.message}`)
       }
     }
     this.callbacks.onLog('未找到可见福袋入口')
     return false
+  }
+
+  private async isLikelyFudaiEntry(handle: ElementHandle<Node>): Promise<boolean> {
+    return handle
+      .evaluate((node) => {
+        if (!(node instanceof Element)) return false
+        const normalize = (text: string) => text.replace(/\s+/g, ' ').trim()
+        const ownText = normalize(node.textContent || '')
+        const attrText = normalize(
+          [
+            node.getAttribute('aria-label') || '',
+            node.getAttribute('alt') || '',
+            node.getAttribute('data-e2e') || '',
+            node.className ? String(node.className) : ''
+          ].join(' ')
+        )
+        let current: Element | null = node
+        const context: string[] = []
+        for (let depth = 0; current && depth < 5; depth++) {
+          context.push(normalize(current.textContent || ''))
+          if (current.id === 'ShortTouchLayout') context.push('ShortTouchLayout')
+          current = current.parentElement
+        }
+        const text = [ownText, attrText, ...context].join(' ')
+        const hasFudaiText = /福袋|超级福袋|粉丝福袋|fudai|luck.?bag|lottery/i.test(text)
+        const hasFudaiCountdown = /ShortTouchLayout/.test(text) && /\b\d{1,2}:\d{2}\b/.test(text)
+        const hasOnlyOtherRedPacket = /红包|red.?packet/i.test(text) && !hasFudaiText
+        return (hasFudaiText || hasFudaiCountdown) && !hasOnlyOtherRedPacket
+      })
+      .catch(() => false)
   }
 
   private async hasVisibleFudaiEntry(): Promise<boolean> {
@@ -349,80 +397,372 @@ export class FudaiService {
       .catch(() => false)
   }
 
-  private async handleFollowRequirement(): Promise<void> {
-    const buttons = this.page.locator('button, [role="button"], div').filter({ hasText: /^(关注|去关注)$/ })
-    const count = await buttons.count().catch(() => 0)
-    if (count === 0) {
-      this.callbacks.onLog('未找到关注按钮，可能已经关注或按钮在弹窗外')
-      return
-    }
-    for (let i = 0; i < Math.min(count, 3); i++) {
-      const button = buttons.nth(i)
-      if (!(await button.isVisible().catch(() => false))) continue
-      await button.click({ timeout: 3000 }).catch((e) => {
-        this.callbacks.onLog(`关注操作失败: ${e.message}`)
+  private async clickVisibleTextAction(options: {
+    keywords: string[]
+    excludeKeywords?: string[]
+    exact: boolean
+    requireLotteryContext?: boolean
+    maxAreaRatio: number
+    logLabel: string
+  }): Promise<boolean> {
+    const target = await this.page
+      .evaluate((opts) => {
+        const viewportArea = Math.max(1, window.innerWidth * window.innerHeight)
+        const isVisible = (element: Element) => {
+          const style = window.getComputedStyle(element)
+          const rect = element.getBoundingClientRect()
+          return (
+            style.display !== 'none' &&
+            style.visibility !== 'hidden' &&
+            Number(style.opacity || 1) > 0.05 &&
+            rect.width >= 8 &&
+            rect.height >= 8 &&
+            rect.bottom > 0 &&
+            rect.right > 0 &&
+            rect.top < window.innerHeight &&
+            rect.left < window.innerWidth &&
+            (rect.width * rect.height) / viewportArea <= opts.maxAreaRatio
+          )
+        }
+        const normalize = (text: string) => text.replace(/\s+/g, ' ').trim()
+        const matches = (text: string) =>
+          opts.exact ? opts.keywords.includes(text) : opts.keywords.some((keyword) => text.includes(keyword))
+        const excluded = (text: string) => (opts.excludeKeywords || []).some((keyword) => text.includes(keyword))
+        const hasLotteryContext = (element: Element) => {
+          if (!opts.requireLotteryContext) return true
+          let current: Element | null = element
+          for (let depth = 0; current && depth < 6; depth++) {
+            const text = normalize(current.textContent || '')
+            if (/福袋|参与条件|加入粉丝团|点亮灯牌|粉丝团点亮|倒计时|发送评论|口令/.test(text)) return true
+            current = current.parentElement
+          }
+          return false
+        }
+
+        const candidates = Array.from(document.querySelectorAll('button, [role="button"], div, span, p'))
+          .map((element) => {
+            const rect = element.getBoundingClientRect()
+            const text = normalize(element.textContent || '')
+            return { element, rect, text, area: rect.width * rect.height }
+          })
+          .filter(({ element, text }) => text && matches(text) && !excluded(text) && isVisible(element) && hasLotteryContext(element))
+          .sort((a, b) => a.area - b.area)
+
+        if ((window as any).__luckBagDebugCandidates === undefined) {
+          ;(window as any).__luckBagDebugCandidates = []
+        }
+        ;(window as any).__luckBagDebugCandidates = candidates.slice(0, 8).map(({ rect, text, area }) => ({
+          text: text.slice(0, 80),
+          x: Math.round(rect.left),
+          y: Math.round(rect.top),
+          w: Math.round(rect.width),
+          h: Math.round(rect.height),
+          area: Math.round(area)
+        }))
+
+        const node = candidates[0]?.element
+        if (!node) return null
+        const rect = node.getBoundingClientRect()
+        return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, text: normalize(node.textContent || '') }
+      }, options)
+      .catch(() => null)
+
+    if (!target) return false
+    await this.logDebugCandidates(options.logLabel)
+    await this.page.mouse.click(target.x, target.y)
+    this.callbacks.onLog(`已点击${options.logLabel}: ${target.text.slice(0, 30)}`)
+    return true
+  }
+
+  private async clickFanBadgeConfirm(): Promise<boolean> {
+    const target = await this.page
+      .evaluate(() => {
+        const viewportArea = Math.max(1, window.innerWidth * window.innerHeight)
+        const keywords = ['确认', '确定', '支付', '点亮', '赠送', '送出', '开通']
+        const contextKeywords = /粉丝团|灯牌|点亮|钻|抖币|支付|确认/
+        const isVisible = (element: Element) => {
+          const style = window.getComputedStyle(element)
+          const rect = element.getBoundingClientRect()
+          return (
+            style.display !== 'none' &&
+            style.visibility !== 'hidden' &&
+            Number(style.opacity || 1) > 0.05 &&
+            rect.width >= 8 &&
+            rect.height >= 8 &&
+            rect.bottom > 0 &&
+            rect.right > 0 &&
+            rect.top < window.innerHeight &&
+            rect.left < window.innerWidth &&
+            (rect.width * rect.height) / viewportArea <= 0.25
+          )
+        }
+        const normalize = (text: string) => text.replace(/\s+/g, ' ').trim()
+        const contextText = (element: Element) => {
+          let current: Element | null = element
+          const parts: string[] = []
+          for (let depth = 0; current && depth < 6; depth++) {
+            parts.push(normalize(current.textContent || ''))
+            current = current.parentElement
+          }
+          return parts.join(' ')
+        }
+        const candidates = Array.from(document.querySelectorAll('button, [role="button"], div, span, p'))
+          .map((element) => {
+            const rect = element.getBoundingClientRect()
+            const text = normalize(element.textContent || '')
+            const ctx = contextText(element)
+            const score =
+              (keywords.some((keyword) => text.includes(keyword)) ? 10 : 0) +
+              (/确认|确定|支付|赠送|送出/.test(text) ? 8 : 0) +
+              (contextKeywords.test(ctx) ? 4 : 0) -
+              (text.includes('加入粉丝团') && !/确认|支付|点亮|赠送|送出/.test(text) ? 8 : 0)
+            return { element, rect, text, area: rect.width * rect.height, score }
+          })
+          .filter(({ element, text, score }) => text && score > 0 && isVisible(element))
+          .sort((a, b) => b.score - a.score || a.area - b.area)
+
+        ;(window as any).__luckBagDebugCandidates = candidates.slice(0, 8).map(({ rect, text, area, score }) => ({
+          text: text.slice(0, 80),
+          x: Math.round(rect.left),
+          y: Math.round(rect.top),
+          w: Math.round(rect.width),
+          h: Math.round(rect.height),
+          area: Math.round(area),
+          score
+        }))
+
+        const node = candidates[0]?.element
+        if (!node) return null
+        const rect = node.getBoundingClientRect()
+        return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, text: normalize(node.textContent || '') }
       })
-      await this.randomDelay(300, 700)
+      .catch(() => null)
+
+    if (!target) return false
+    await this.logDebugCandidates('确认加入粉丝团')
+    await this.page.mouse.click(target.x, target.y)
+    this.callbacks.onLog(`已点击确认加入粉丝团: ${target.text.slice(0, 30)}`)
+    return true
+  }
+
+  private async waitForFanBadgeSatisfied(timeoutMs: number): Promise<boolean> {
+    const startedAt = Date.now()
+    while (Date.now() - startedAt < timeoutMs && this.canWork()) {
+      if (this.lastGiftSendAt >= startedAt) return true
+      if (this.latestLotteryRight && !this.latestLotteryRight.requiresFanBadge) return true
+
+      const satisfied = await this.page
+        .evaluate(() => {
+          const text = (document.body.innerText || '').replace(/\s+/g, ' ')
+          if (/已加入粉丝团|已点亮|已满足|已达成|已参与|等待开奖/.test(text)) return true
+          if (/加入粉丝团\s*已达成|点亮灯牌\s*已达成|粉丝团点亮\s*已达成/.test(text)) return true
+          return false
+        })
+        .catch(() => false)
+      if (satisfied) return true
+      await this.page.waitForTimeout(400)
+    }
+    return false
+  }
+
+  private async handleFollowRequirement(): Promise<void> {
+    const clicked = await this.clickVisibleTextAction({
+      keywords: ['关注', '去关注'],
+      excludeKeywords: ['已关注', '取消关注'],
+      exact: false,
+      maxAreaRatio: 0.15,
+      logLabel: '关注主播'
+    })
+    if (clicked) {
+      await this.randomDelay(500, 900)
       this.callbacks.onLog('已自动关注主播')
       return
     }
-    this.callbacks.onLog('关注按钮存在但不可见，跳过关注点击')
+
+    this.callbacks.onLog('未找到可点击关注按钮，可能已经关注或按钮暂未展示')
+  }
+
+  private async clickFanBadgeEntry(): Promise<boolean> {
+    const beforeUrl = this.page.url()
+    const clicked = await this.clickVisibleTextAction({
+      keywords: ['加入粉丝团', '点亮灯牌', '粉丝团点亮', '加灯牌', '去点亮', '开通粉丝团'],
+      exact: false,
+      requireLotteryContext: true,
+      maxAreaRatio: 0.35,
+      logLabel: '加入粉丝团/点亮灯牌'
+    })
+    if (clicked) {
+      await this.page.waitForTimeout(500).catch(() => {})
+      if (this.page.url() !== beforeUrl) {
+        this.callbacks.onLog('点击粉丝团入口后页面发生跳转，尝试返回直播间')
+        await this.page.goBack({ waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {})
+        await this.page.waitForTimeout(1000).catch(() => {})
+        return false
+      }
+      this.callbacks.onLog('已点击加入粉丝团/点亮灯牌入口')
+      return true
+    }
+
+    return false
   }
 
   private async handleFanBadgeRequirement(cost: number): Promise<boolean> {
     const config = store.store
     const remaining = config.diamondBudget - config.diamondUsed
     if (remaining < cost) {
-      this.callbacks.onFudaiSkipped(`钻石预算不足，剩余 ${remaining}，需要 ${cost}`)
+      this.callbacks.onFudaiSkipped(`钻石预算不足，剩余=${remaining}，需要=${cost}`)
       return false
     }
 
-    const joinButton = this.page
-      .locator('button, [role="button"], div')
-      .filter({ hasText: /加入粉丝团|点亮灯牌|加灯牌|去点亮|开通粉丝团/ })
-      .first()
-    if ((await joinButton.count().catch(() => 0)) === 0 || !(await joinButton.isVisible().catch(() => false))) {
-      this.callbacks.onLog('未找到加入粉丝团按钮，可能已经满足灯牌要求')
-      return true
+    const clickedEntry = await this.clickFanBadgeEntry()
+    if (!clickedEntry) {
+      this.callbacks.onFudaiSkipped('未找到可点击的加入粉丝团/点亮灯牌入口，已避免点击普通礼物')
+      this.failureCooldownUntil = Date.now() + FAILURE_COOLDOWN_MS
+      return false
     }
 
-    await joinButton.click({ timeout: 3000 }).catch((e) => {
-      this.callbacks.onLog(`加入粉丝团点击失败: ${e.message}`)
-    })
     await this.randomDelay(600, 1000)
+    await this.clickFanBadgeConfirm()
 
-    const confirmButton = this.page.locator('button, [role="button"], div').filter({ hasText: /确认|确定|支付|加入|开通/ }).first()
-    if ((await confirmButton.count().catch(() => 0)) > 0 && (await confirmButton.isVisible().catch(() => false))) {
-      await confirmButton.click({ timeout: 3000 }).catch(() => {})
+    const verified = await this.waitForFanBadgeSatisfied(7000)
+    if (!verified) {
+      this.callbacks.onFudaiSkipped('加入粉丝团/点亮灯牌后未确认任务完成，停止本次参与')
+      this.failureCooldownUntil = Date.now() + FAILURE_COOLDOWN_MS
+      return false
     }
 
     store.set('diamondUsed', config.diamondUsed + cost)
     this.callbacks.onFanBadgeAdded(cost)
+    this.callbacks.onLog(`已确认加入粉丝团/点亮灯牌，花费 ${cost} 钻石`)
     return true
   }
 
-  private async handleCommentRequirement(commentText: string): Promise<void> {
+  private async handleCommentRequirement(commentText: string): Promise<boolean> {
     const text = commentText || '福袋'
-    const input = this.page.locator(SELECTORS.commentInput).first()
-    if ((await input.count().catch(() => 0)) === 0) {
-      this.callbacks.onLog('未找到评论输入框')
-      return
-    }
 
-    await input.click({ timeout: 3000 }).catch(() => {})
-    await this.randomDelay(200, 400)
-    await input.fill(text).catch(async () => {
-      await this.page.keyboard.type(text, { delay: 40 })
+    const oneClickStartedAt = Date.now()
+    const oneClick = await this.clickVisibleTextAction({
+      keywords: ['一键发评论', '发评论参与', '评论参与', '发送评论参与', '一键评论'],
+      excludeKeywords: ['参与条件', '未达成'],
+      exact: false,
+      requireLotteryContext: true,
+      maxAreaRatio: 0.35,
+      logLabel: '一键发评论'
     })
-
-    const sendButton = this.page.locator('button, [role="button"], div').filter({ hasText: /发送|评论/ }).first()
-    if ((await sendButton.count().catch(() => 0)) > 0 && (await sendButton.isVisible().catch(() => false))) {
-      await sendButton.click({ timeout: 3000 }).catch(() => this.page.keyboard.press('Enter'))
-    } else {
-      await this.page.keyboard.press('Enter')
+    if (oneClick) {
+      const ok = await this.waitForCommentSatisfied(oneClickStartedAt, 7000)
+      if (ok) {
+        this.callbacks.onLog(`已完成评论任务: ${text}`)
+        return true
+      }
+      this.debugLog('一键发评论后未确认任务完成，尝试手动评论兜底')
     }
+
+    const startedAt = Date.now()
+    const inputTarget = await this.findCommentInputTarget()
+    if (!inputTarget) {
+      this.callbacks.onFudaiSkipped('未找到可用评论输入框')
+      this.failureCooldownUntil = Date.now() + FAILURE_COOLDOWN_MS
+      return false
+    }
+
+    await this.page.mouse.click(inputTarget.x, inputTarget.y)
+    await this.randomDelay(200, 400)
+    await this.page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => {})
+    await this.page.keyboard.type(text, { delay: 35 })
+    await this.randomDelay(200, 400)
+    await this.page.keyboard.press('Enter')
     this.callbacks.onLog(`已发送评论: ${text}`)
-    await this.randomDelay(500, 900)
+
+    const ok = await this.waitForCommentSatisfied(startedAt, 8000)
+    if (!ok) {
+      this.callbacks.onFudaiSkipped('评论发送后未确认任务完成，停止本次参与')
+      this.failureCooldownUntil = Date.now() + FAILURE_COOLDOWN_MS
+      return false
+    }
+
+    this.callbacks.onLog(`已确认评论任务完成: ${text}`)
+    return true
+  }
+
+  private async findCommentInputTarget(): Promise<{ x: number; y: number; text: string } | null> {
+    const target = await this.page
+      .evaluate(() => {
+        const isVisible = (element: Element) => {
+          const style = window.getComputedStyle(element)
+          const rect = element.getBoundingClientRect()
+          return (
+            style.display !== 'none' &&
+            style.visibility !== 'hidden' &&
+            Number(style.opacity || 1) > 0.05 &&
+            rect.width >= 20 &&
+            rect.height >= 12 &&
+            rect.bottom > 0 &&
+            rect.right > 0 &&
+            rect.top < window.innerHeight &&
+            rect.left < window.innerWidth
+          )
+        }
+        const normalize = (text: string) => text.replace(/\s+/g, ' ').trim()
+        const candidates = Array.from(document.querySelectorAll('textarea, input[type="text"], [contenteditable="true"]'))
+          .filter((element) => isVisible(element))
+          .map((element) => {
+            const rect = element.getBoundingClientRect()
+            const text = normalize(
+              [
+                element.getAttribute('placeholder') || '',
+                element.getAttribute('aria-label') || '',
+                element.textContent || ''
+              ].join(' ')
+            )
+            const score =
+              (/评论|说点|聊聊|发言|弹幕|输入/.test(text) ? 10 : 0) +
+              (rect.top > window.innerHeight * 0.45 ? 4 : 0) +
+              (rect.width > 100 ? 2 : 0)
+            return { rect, text, score }
+          })
+          .sort((a, b) => b.score - a.score || b.rect.top - a.rect.top)
+
+        ;(window as any).__luckBagDebugCandidates = candidates.slice(0, 8).map(({ rect, text, score }) => ({
+          text: text.slice(0, 80),
+          x: Math.round(rect.left),
+          y: Math.round(rect.top),
+          w: Math.round(rect.width),
+          h: Math.round(rect.height),
+          score
+        }))
+
+        const best = candidates[0]
+        if (!best) return null
+        return {
+          x: best.rect.left + Math.min(best.rect.width - 8, Math.max(8, best.rect.width / 2)),
+          y: best.rect.top + best.rect.height / 2,
+          text: best.text
+        }
+      })
+      .catch(() => null)
+
+    await this.logDebugCandidates('评论输入框')
+    return target
+  }
+
+  private async waitForCommentSatisfied(startedAt: number, timeoutMs: number): Promise<boolean> {
+    while (Date.now() - startedAt < timeoutMs && this.canWork()) {
+      if (this.lastChatSendAt >= startedAt) return true
+      if (this.latestLotteryRight && !this.latestLotteryRight.requiresComment) return true
+
+      const satisfied = await this.page
+        .evaluate(() => {
+          const text = (document.body.innerText || '').replace(/\s+/g, ' ')
+          if (/发送评论[：:].{0,80}已达成|评论[：:].{0,80}已达成|口令[：:].{0,80}已达成/.test(text)) return true
+          if (/已发送评论|评论成功|已参与|等待开奖|参与成功/.test(text)) return true
+          return false
+        })
+        .catch(() => false)
+      if (satisfied) return true
+      await this.page.waitForTimeout(400)
+    }
+    return false
   }
 
   private async clickParticipate(info: FudaiInfo): Promise<void> {
@@ -517,13 +857,28 @@ export class FudaiService {
     const lotteryInfo = data?.lottery_info
     if (!lotteryInfo) return null
 
-    const conditionText = JSON.stringify(lotteryInfo.conditions || [])
+    const conditions = Array.isArray(lotteryInfo.conditions) ? lotteryInfo.conditions : []
+    const conditionText = JSON.stringify(conditions)
     const userCondition = data?.user_condition || {}
+    const commentCondition = conditions.find((condition: any) => Number(condition.type) === 3 || /口令|评论|发送/.test(String(condition.description || condition.content || '')))
+    const fanBadgeCondition = conditions.find((condition: any) => Number(condition.type) === 8 || /粉丝团|灯牌/.test(String(condition.description || condition.content || '')))
+    const followCondition = conditions.find((condition: any) => Number(condition.type) === 1 || /关注/.test(String(condition.description || condition.content || '')))
+    if (!followCondition) userCondition.has_follow = true
+    if (!commentCondition) userCondition.has_command = true
+    if (!fanBadgeCondition || userCondition.is_fansclub_member === true) {
+      userCondition.is_fansclub_member = true
+      userCondition.fansclub_status_active = true
+    }
+    if (fanBadgeCondition && Number(fanBadgeCondition.status) !== 1) {
+      userCondition.is_fansclub_member = false
+      userCondition.fansclub_status_active = false
+    }
     const commentText =
       (lotteryInfo.conditions || [])
         .map((condition: any) => String(condition.content || condition.description || ''))
         .map((value: string) => value.match(/(?:发送口令|口令|评论)[：:\s]*([\u4e00-\u9fa5A-Za-z0-9_-]{1,30})/)?.[1] || '')
-        .find(Boolean) || ''
+        .find(Boolean)
+    const commandText = this.extractCommandText(commentCondition) || commentText || ''
     const currentTime = this.normalizeTimestamp(lotteryInfo.current_time ?? payload?.extra?.now)
     const drawTime = this.normalizeTimestamp(lotteryInfo.draw_time)
     const remainingFromDraw =
@@ -536,7 +891,7 @@ export class FudaiService {
         userCondition.is_fansclub_member === false &&
         (/粉丝团|灯牌|fans|club/i.test(conditionText) || userCondition.fansclub_status_active === false),
       requiresComment: userCondition.has_command === false || /口令|评论|发送/.test(conditionText),
-      commentText,
+      commentText: commandText,
       fanBadgeCost: Math.max(1, Number(conditionText.match(/(\d{1,3})\s*(?:钻石|抖币)/)?.[1] || 1)),
       remainingSeconds:
         remainingFromDraw !== null && remainingFromDraw > 0
@@ -551,6 +906,15 @@ export class FudaiService {
     const numeric = Number(value)
     if (!Number.isFinite(numeric) || numeric <= 0) return null
     return numeric > 10_000_000_000 ? numeric : numeric * 1000
+  }
+
+  private extractCommandText(condition: any): string {
+    if (!condition) return ''
+    const content = String(condition.content || '').trim()
+    if (content) return content
+    const description = String(condition.description || '').trim()
+    const match = description.match(/(?:发送口令|口令|评论)\s*[:：]\s*(.+)$/)
+    return (match?.[1] || '').trim()
   }
 
   private async getVisibleDomFudaiInfo(): Promise<{ visible: boolean; remainingSeconds: number | null }> {
@@ -604,6 +968,22 @@ export class FudaiService {
 
   private canWork(): boolean {
     return this.isMonitoring && !this.page.isClosed()
+  }
+
+  private debugEnabled(): boolean {
+    return Boolean(store.get('debugLogs'))
+  }
+
+  private debugLog(message: string): void {
+    if (this.debugEnabled()) this.callbacks.onLog(`[debug] ${message}`)
+  }
+
+  private async logDebugCandidates(label: string): Promise<void> {
+    if (!this.debugEnabled()) return
+    const candidates = await this.page
+      .evaluate(() => (window as any).__luckBagDebugCandidates || [])
+      .catch(() => [])
+    this.callbacks.onLog(`[debug] ${label}候选: ${JSON.stringify(candidates).slice(0, 900)}`)
   }
 
   private async randomDelay(min: number, max: number): Promise<void> {
