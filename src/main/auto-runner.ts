@@ -222,6 +222,13 @@ export class AutoRunner {
     try {
       this.prunePools()
 
+      if (this.roomManager.getAllRooms().length > 0) {
+        this.setStatus('waiting')
+        this.log('已有直播间正在处理或等待开奖，暂停新的扫描、验证和进房')
+        this.scheduleNext(5)
+        return
+      }
+
       const enteredBeforeWork = await this.enterDueRooms()
       if (!this.state.running) return
       if (enteredBeforeWork > 0) {
@@ -353,24 +360,18 @@ export class AutoRunner {
         }
 
         try {
-          let enteredRoomId = ''
           if (result.page && !result.page.isClosed()) {
-            const room = await this.roomManager.addRoomFromPage(result.page, result.room.url, result.room.name, {
+            await this.roomManager.addRoomFromPage(result.page, result.room.url, result.room.name, {
               countdownText: result.room.countdownText,
               remainingSeconds
             })
-            enteredRoomId = room.id
           } else {
-            const room = await this.roomManager.addRoom(result.room.url, result.room.name, {
+            await this.roomManager.addRoom(result.room.url, result.room.name, {
               countdownText: result.room.countdownText,
               remainingSeconds
             })
-            enteredRoomId = room.id
           }
           const waitSeconds = Math.max(30, remainingSeconds + AFTER_DRAW_RESUME_BUFFER_SECONDS)
-          if (enteredRoomId) {
-            this.scheduleRoomRemovalAfterDraw(enteredRoomId, result.room.name, waitSeconds)
-          }
           this.log(
             `验证时已临近开奖，直接在当前直播间参与：${result.room.name}，剩余=${remainingSeconds}秒，约 ${waitSeconds} 秒后继续搜索`
           )
@@ -418,19 +419,12 @@ export class AutoRunner {
 
       const remainingSeconds = this.currentRemainingSeconds(room)
       try {
-        const enteredRoom = await this.roomManager.addRoom(room.url, room.name, {
+        await this.roomManager.addRoom(room.url, room.name, {
           countdownText: room.countdownText,
           remainingSeconds
         })
         this.candidatePool.delete(room.url)
         entered++
-        if (remainingSeconds !== null) {
-          this.scheduleRoomRemovalAfterDraw(
-            enteredRoom.id,
-            room.name,
-            Math.max(30, remainingSeconds + AFTER_DRAW_RESUME_BUFFER_SECONDS)
-          )
-        }
         this.log(`进入临近开奖直播间：${room.name}，剩余=${remainingSeconds ?? '未知'}秒`)
       } catch (e: any) {
         this.log(`进入临近开奖直播间失败：${e.message}`)

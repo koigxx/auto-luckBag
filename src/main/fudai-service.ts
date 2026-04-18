@@ -6,6 +6,7 @@ export interface FudaiCallbacks {
   onFudaiDetected: (info: FudaiInfo) => void
   onFudaiGrabbed: (info: FudaiInfo, result: FudaiGrabResult) => void
   onFudaiSkipped: (reason: string) => void
+  onFudaiInfoUpdated: (info: Partial<FudaiInfo>) => void
   onFanBadgeAdded: (cost: number) => void
   onLog: (message: string) => void
 }
@@ -107,6 +108,14 @@ export class FudaiService {
       const info = this.parseLotteryRightInfo(text)
       if (info) {
         this.latestLotteryRight = info
+        this.callbacks.onFudaiInfoUpdated({
+          requiresFollow: info.requiresFollow,
+          requiresFanBadge: info.requiresFanBadge,
+          requiresComment: info.requiresComment,
+          commentText: info.commentText,
+          fanBadgeCost: info.fanBadgeCost,
+          remainingSeconds: info.remainingSeconds
+        })
         this.callbacks.onLog(
           `已获取福袋任务信息：关注=${info.requiresFollow ? '是' : '否'}，粉丝团=${info.requiresFanBadge ? '是' : '否'}，评论=${info.requiresComment ? '是' : '否'}，剩余=${info.remainingSeconds ?? '未知'}秒`
         )
@@ -199,8 +208,11 @@ export class FudaiService {
         return
       }
 
+      const previousLotteryRight = this.latestLotteryRight
+      this.latestLotteryRight = null
       const clicked = await this.clickVisibleFudaiIcon()
       if (!clicked) {
+        this.latestLotteryRight = previousLotteryRight
         const reason = source === 'websocket' ? '未找到可见福袋入口，等待页面展示' : '检测到的福袋入口不可点击'
         this.callbacks.onFudaiSkipped(reason)
         this.failureCooldownUntil = Date.now() + FAILURE_COOLDOWN_MS
@@ -208,9 +220,14 @@ export class FudaiService {
       }
 
       await this.waitForLotteryPanelOrRightInfo(6000)
+      if (!this.latestLotteryRight) this.latestLotteryRight = previousLotteryRight
       if (!this.canWork()) return
 
       const enrichedInfo = await this.enrichInfoFromPage(info)
+      this.callbacks.onFudaiInfoUpdated(enrichedInfo)
+      this.callbacks.onLog(
+        `准备执行福袋任务：关注=${enrichedInfo.requiresFollow ? '是' : '否'}，粉丝团=${enrichedInfo.requiresFanBadge ? '是' : '否'}，评论=${enrichedInfo.requiresComment ? '是' : '否'}，口令=${enrichedInfo.commentText || '无'}`
+      )
       if (enrichedInfo.requiresFollow) await this.handleFollowRequirement()
       if (!this.canWork()) return
 
@@ -335,7 +352,10 @@ export class FudaiService {
   private async handleFollowRequirement(): Promise<void> {
     const buttons = this.page.locator('button, [role="button"], div').filter({ hasText: /^(关注|去关注)$/ })
     const count = await buttons.count().catch(() => 0)
-    if (count === 0) return
+    if (count === 0) {
+      this.callbacks.onLog('未找到关注按钮，可能已经关注或按钮在弹窗外')
+      return
+    }
     for (let i = 0; i < Math.min(count, 3); i++) {
       const button = buttons.nth(i)
       if (!(await button.isVisible().catch(() => false))) continue
@@ -346,6 +366,7 @@ export class FudaiService {
       this.callbacks.onLog('已自动关注主播')
       return
     }
+    this.callbacks.onLog('关注按钮存在但不可见，跳过关注点击')
   }
 
   private async handleFanBadgeRequirement(cost: number): Promise<boolean> {

@@ -225,16 +225,17 @@ export class RoomManager {
     const fudaiService = new FudaiService(room.page, room.id, {
       onFudaiDetected: (info) => {
         this.log(room.id, `检测到福袋: ${info.type}`)
+        this.updateRoomFudaiTiming(room, info.remainingSeconds)
         room.status = 'grabbing'
         this.notifyUpdate(room)
+      },
+      onFudaiInfoUpdated: (info) => {
+        this.updateRoomFudaiTiming(room, info.remainingSeconds)
       },
       onFudaiGrabbed: (info, result) => {
         room.fudaiCount++
         this.log(room.id, `参与福袋成功: ${info.type}`)
-        if (typeof info.remainingSeconds === 'number' && info.remainingSeconds > 0) {
-          room.remainingSeconds = info.remainingSeconds
-          this.scheduleAutoCloseAfterDraw(room.id, room.name, Math.max(30, info.remainingSeconds + 20))
-        }
+        this.updateRoomFudaiTiming(room, info.remainingSeconds)
         if (result.won && (result.prizeType === 'physical' || result.prizeType === 'diamond')) {
           this.log(room.id, `识别到中奖: ${result.prizeType}`)
         } else if (result.prizeType === 'coupon') {
@@ -259,6 +260,13 @@ export class RoomManager {
 
     room.fudaiService = fudaiService
     await fudaiService.startMonitoring()
+  }
+
+  private updateRoomFudaiTiming(room: Room, remainingSeconds: number | null | undefined): void {
+    if (typeof remainingSeconds !== 'number' || remainingSeconds <= 0) return
+    room.remainingSeconds = Math.floor(remainingSeconds)
+    this.scheduleAutoCloseAfterDraw(room.id, room.name, Math.max(30, room.remainingSeconds + 20))
+    this.notifyUpdate(room)
   }
 
   private scheduleAutoCloseAfterDraw(roomId: string, roomName: string, delaySeconds: number): void {
