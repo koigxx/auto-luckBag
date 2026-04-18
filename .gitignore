@@ -1,0 +1,10 @@
+node_modules/
+out/
+dist-electron/
+*.tsbuildinfo
+electron.vite.config.js
+src/preload/*.js
+src/preload/*.d.ts
+
+.DS_Store
+Thumbs.db
