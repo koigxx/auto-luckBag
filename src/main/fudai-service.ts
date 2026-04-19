@@ -92,7 +92,7 @@ export class FudaiService {
     this.callbacks.onLog('停止监控福袋')
   }
 
-  async finalizeParticipationIfDetected(): Promise<void> {
+  async finalizeParticipationIfDetected(): Promise<FudaiGrabResult | null> {
     const result = await this.checkParticipateResult()
     if (result.participated) {
       this.handleParticipated(
@@ -109,7 +109,9 @@ export class FudaiService {
         },
         result
       )
+      return result
     }
+    return result.won || result.resultText ? result : null
   }
 
   private setupWebSocketListener(): void {

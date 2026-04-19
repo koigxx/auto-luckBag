@@ -4,6 +4,9 @@ import { FudaiGrabResult, FudaiService } from './fudai-service'
 import { store } from './store'
 import { logError, logInfo } from './logger'
 
+const AFTER_DRAW_NO_WIN_CLOSE_DELAY_SECONDS = 3
+const AFTER_DRAW_WIN_CLOSE_DELAY_SECONDS = 10
+
 export type RoomStatus = 'loading' | 'monitoring' | 'grabbing' | 'error' | 'idle'
 
 export interface Room {
@@ -242,11 +245,19 @@ export class RoomManager {
       },
       onFudaiInfoUpdated: (info) => {
         this.updateRoomFudaiTiming(room, info.remainingSeconds, info.drawAt)
+        if (room.fudaiCount === 0) {
+          void room.fudaiService?.finalizeParticipationIfDetected().catch(() => {})
+        }
       },
       onFudaiGrabbed: (info, result) => {
         room.fudaiCount++
         this.log(room.id, `参与福袋成功: ${info.type}`)
-        this.updateRoomFudaiTiming(room, info.remainingSeconds, info.drawAt)
+        this.updateRoomFudaiTiming(
+          room,
+          info.remainingSeconds,
+          info.drawAt,
+          result.won ? AFTER_DRAW_WIN_CLOSE_DELAY_SECONDS : AFTER_DRAW_NO_WIN_CLOSE_DELAY_SECONDS
+        )
         if (result.won && (result.prizeType === 'physical' || result.prizeType === 'diamond')) {
           this.log(room.id, `识别到中奖: ${result.prizeType}`)
         } else if (result.prizeType === 'coupon') {
@@ -274,7 +285,12 @@ export class RoomManager {
     await fudaiService.startMonitoring()
   }
 
-  private updateRoomFudaiTiming(room: Room, remainingSeconds: number | null | undefined, drawAt?: number | null): void {
+  private updateRoomFudaiTiming(
+    room: Room,
+    remainingSeconds: number | null | undefined,
+    drawAt?: number | null,
+    postDrawDelaySeconds = AFTER_DRAW_NO_WIN_CLOSE_DELAY_SECONDS
+  ): void {
     const nextDrawAt = typeof drawAt === 'number' && drawAt > 0 ? drawAt : null
     const nextRemaining =
       nextDrawAt !== null
@@ -290,17 +306,37 @@ export class RoomManager {
     room.remainingSeconds = nextRemaining
     if (nextDrawAt !== null) room.drawAt = nextDrawAt
     else if (typeof remainingSeconds === 'number') room.drawAt = Date.now() + nextRemaining * 1000
-    this.scheduleAutoCloseAfterDraw(room.id, room.name, Math.max(10, room.remainingSeconds + 5))
+    this.scheduleAutoCloseAfterDraw(
+      room.id,
+      room.name,
+      Math.max(postDrawDelaySeconds, room.remainingSeconds + postDrawDelaySeconds)
+    )
     this.notifyUpdate(room)
   }
 
-  private scheduleAutoCloseAfterDraw(roomId: string, roomName: string, delaySeconds: number): void {
+  private scheduleAutoCloseAfterDraw(
+    roomId: string,
+    roomName: string,
+    delaySeconds: number,
+    extendedForWin = false
+  ): void {
     const existing = this.autoCloseTimers.get(roomId)
     if (existing) clearTimeout(existing)
 
     const timer = setTimeout(() => {
       void (async () => {
-        if (!this.rooms.has(roomId)) return
+        const room = this.rooms.get(roomId)
+        if (!room) return
+        const finalResult = await room.fudaiService?.finalizeParticipationIfDetected().catch(() => null)
+        if (finalResult?.won && !extendedForWin) {
+          const extraDelay = Math.max(
+            1,
+            AFTER_DRAW_WIN_CLOSE_DELAY_SECONDS - AFTER_DRAW_NO_WIN_CLOSE_DELAY_SECONDS
+          )
+          this.log(roomId, `识别到中奖结果，延迟 ${extraDelay} 秒后关闭直播间以完成统计`)
+          this.scheduleAutoCloseAfterDraw(roomId, roomName, extraDelay, true)
+          return
+        }
         this.log(roomId, `福袋开奖等待结束，关闭直播间: ${roomName}`)
         await this.removeRoom(roomId).catch((e: any) => {
           this.log(roomId, `关闭开奖后直播间失败: ${e.message}`)

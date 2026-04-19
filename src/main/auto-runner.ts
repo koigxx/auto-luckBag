@@ -53,7 +53,7 @@ const DEFAULT_CANDIDATE_POOL_LIMIT = 5
 const RISK_PAUSE_MS = 10 * 60 * 1000
 const CANDIDATE_TTL_MS = 30 * 60 * 1000
 const REJECTED_CANDIDATE_TTL_MS = 30 * 60 * 1000
-const VERIFY_DIRECT_ENTER_MIN_RATIO = 0.8
+const VERIFY_DIRECT_ENTER_MIN_RATIO = 0.7
 const AFTER_DRAW_RESUME_BUFFER_SECONDS = 5
 const RECHECK_CANDIDATE_TTL_MS = 8 * 60 * 1000
 const SCAN_OPERATION_TIMEOUT_MS = 75_000
@@ -348,12 +348,14 @@ export class AutoRunner {
         (this.rejectedUntil.get(room.url) || 0) <= now
     ).sort((a, b) => Number(preferredUrls.has(b.url)) - Number(preferredUrls.has(a.url)))
 
+    let addedToVerify = 0
     for (const room of newRooms) {
       if (this.pendingVerify.length >= MAX_PENDING_VERIFY) break
       this.pendingVerify.push(room)
+      addedToVerify += 1
     }
     this.sortPendingVerify()
-    this.log(`扫描完成：发现 ${discoveredRooms.length} 个候选，新增 ${newRooms.length} 个待验证，队列 ${this.pendingVerify.length}`)
+    this.log(`扫描完成：发现 ${discoveredRooms.length} 个候选，加入待验证 ${addedToVerify} 个，待验证总数 ${this.pendingVerify.length}`)
   }
 
   private async verifyNextCandidate(): Promise<number> {
@@ -418,7 +420,7 @@ export class AutoRunner {
         const conflict = this.findDrawTimeConflict(result.room)
         if (conflict) {
           this.log(
-            `临近开奖直播间与现有福袋开奖时间接近，但当前剩余超过提前进房时间 80%，优先接管当前直播间：${result.room.name}，冲突=${conflict.name}，间隔=${conflict.diffSeconds}秒`
+            `临近开奖直播间与现有福袋开奖时间接近，但当前剩余超过提前进房时间 70%，优先接管当前直播间：${result.room.name}，冲突=${conflict.name}，间隔=${conflict.diffSeconds}秒`
           )
         }
         if (!this.roomManager.hasCapacity()) {
