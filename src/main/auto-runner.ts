@@ -44,16 +44,16 @@ export interface AutoRunState {
 }
 
 const DEFAULT_SOURCE_URL = ''
-const DEFAULT_SCAN_INTERVAL_SECONDS = 50
-const MIN_ENTER_BEFORE_SECONDS = 90
-const DEFAULT_ENTER_BEFORE_SECONDS = 90
+const DEFAULT_SCAN_INTERVAL_SECONDS = 35
+const MIN_ENTER_BEFORE_SECONDS = 60
+const DEFAULT_ENTER_BEFORE_SECONDS = 65
 const MAX_PENDING_VERIFY = 5
 const MAX_CANDIDATES = 5
-const DEFAULT_CANDIDATE_POOL_LIMIT = 5
+const DEFAULT_CANDIDATE_POOL_LIMIT = 4
 const RISK_PAUSE_MS = 10 * 60 * 1000
 const CANDIDATE_TTL_MS = 30 * 60 * 1000
 const REJECTED_CANDIDATE_TTL_MS = 30 * 60 * 1000
-const VERIFY_DIRECT_ENTER_MIN_RATIO = 0.7
+const VERIFY_DIRECT_ENTER_MIN_RATIO = 0.6
 const AFTER_DRAW_RESUME_BUFFER_SECONDS = 5
 const RECHECK_CANDIDATE_TTL_MS = 8 * 60 * 1000
 const SCAN_OPERATION_TIMEOUT_MS = 75_000
@@ -78,6 +78,7 @@ export class AutoRunner {
   private rejectedUntil: Map<string, number> = new Map()
   private candidatePool: Map<string, VerifiedFudaiRoom> = new Map()
   private lastActiveRoomWaitLogAt = 0
+  private lastPendingVerifyLogAt = 0
   private state: AutoRunState = {
     running: false,
     status: 'stopped',
@@ -221,6 +222,7 @@ export class AutoRunner {
   }
 
   getState(): AutoRunState {
+    this.pruneCandidatePool()
     return {
       ...this.state,
       candidateCount: this.candidatePool.size,
@@ -281,11 +283,15 @@ export class AutoRunner {
       this.promoteDueRecheckCandidates()
 
       if (this.pendingVerify.length === 0) {
+        this.lastPendingVerifyLogAt = 0
         await this.scanForCandidates()
         if (!this.state.running) return
         if (this.pauseForActiveRoom()) return
       } else {
-        this.log(`待验证队列还有 ${this.pendingVerify.length} 个候选，本轮不重复扫描入口页`)
+        if (Date.now() - this.lastPendingVerifyLogAt > 60_000) {
+          this.lastPendingVerifyLogAt = Date.now()
+          this.log(`待验证队列还有 ${this.pendingVerify.length} 个候选，本轮不重复扫描入口页；验证进房仍按风控间隔串行执行`)
+        }
       }
 
       if (!this.hasPendingEnterWindow()) {
@@ -371,7 +377,8 @@ export class AutoRunner {
     this.setStatus('verifying')
     const verifyResult = await this.withTimeout(
       this.discoveryService.verifyRoom(candidate, {
-        keepPageOnVerified: true
+        keepPageOnVerified: true,
+        minDwellMs: Math.floor(this.state.scanIntervalSeconds * 1000 * 0.2)
       }),
       VERIFY_OPERATION_TIMEOUT_MS,
       `验证候选超时：${candidate.name || candidate.url}`
@@ -420,7 +427,7 @@ export class AutoRunner {
         const conflict = this.findDrawTimeConflict(result.room)
         if (conflict) {
           this.log(
-            `临近开奖直播间与现有福袋开奖时间接近，但当前剩余超过提前进房时间 70%，优先接管当前直播间：${result.room.name}，冲突=${conflict.name}，间隔=${conflict.diffSeconds}秒`
+            `临近开奖直播间与现有福袋开奖时间接近，但当前剩余超过提前进房时间 60%，优先接管当前直播间：${result.room.name}，冲突=${conflict.name}，间隔=${conflict.diffSeconds}秒`
           )
         }
         if (!this.roomManager.hasCapacity()) {
@@ -706,13 +713,7 @@ export class AutoRunner {
 
   private prunePools(): void {
     const now = Date.now()
-    for (const [url, room] of this.candidatePool) {
-      const remainingSeconds = this.currentRemainingSeconds(room)
-      const tooOld = now - room.verifiedAt > CANDIDATE_TTL_MS
-      if ((remainingSeconds !== null && remainingSeconds <= 0) || tooOld || this.roomManager.hasRoom(url)) {
-        this.candidatePool.delete(url)
-      }
-    }
+    this.pruneCandidatePool(now)
     for (const [url, until] of this.rejectedUntil) {
       if (until <= now) this.rejectedUntil.delete(url)
     }
@@ -737,6 +738,16 @@ export class AutoRunner {
       room,
       availableAt: Date.now() + RECHECK_CANDIDATE_TTL_MS
     })
+  }
+
+  private pruneCandidatePool(now = Date.now()): void {
+    for (const [url, room] of this.candidatePool) {
+      const remainingSeconds = this.currentRemainingSeconds(room)
+      const tooOld = now - room.verifiedAt > CANDIDATE_TTL_MS
+      if ((remainingSeconds !== null && remainingSeconds <= 0) || tooOld || this.roomManager.hasRoom(url)) {
+        this.candidatePool.delete(url)
+      }
+    }
   }
 
   private promoteDueRecheckCandidates(): void {
@@ -808,6 +819,7 @@ export class AutoRunner {
   }
 
   private getCandidateSnapshot(): VerifiedFudaiRoom[] {
+    this.pruneCandidatePool()
     return Array.from(this.candidatePool.values()).map((room) => ({
       ...room,
       remainingSeconds: this.currentRemainingSeconds(room)

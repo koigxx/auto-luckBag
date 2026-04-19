@@ -3,6 +3,7 @@ export interface FudaiInfo {
   requiresFollow: boolean
   requiresFanBadge: boolean
   requiresComment: boolean
+  requiresShare: boolean
   commentText: string
   fanBadgeCost: number
   description: string
@@ -56,6 +57,7 @@ function parseTextMessage(text: string): FudaiInfo | null {
     requiresFollow: /关注|follow/i.test(text),
     requiresFanBadge: /粉丝团|灯牌|fan.?badge|club/i.test(text),
     requiresComment: /评论|口令|comment|keyword/i.test(text),
+    requiresShare: /分享|share/i.test(text),
     commentText: extractCommentText(text),
     fanBadgeCost: extractFanBadgeCost(text),
     remainingSeconds,
@@ -83,6 +85,7 @@ function extractFudaiInfo(data: any, method: string): FudaiInfo {
     requiresComment: Boolean(
       conditions.require_comment || data?.require_comment || /评论|口令|comment|keyword/i.test(text)
     ),
+    requiresShare: Boolean(conditions.require_share || data?.require_share || /分享|share/i.test(text)),
     commentText:
       String(data?.comment_text || data?.keyword || conditions.comment_text || '') ||
       extractCommentText(text),

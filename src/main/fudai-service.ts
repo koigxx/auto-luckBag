@@ -24,6 +24,7 @@ interface LotteryRightInfo {
   requiresFollow: boolean
   requiresFanBadge: boolean
   requiresComment: boolean
+  requiresShare: boolean
   commentText: string
   fanBadgeCost: number
   remainingSeconds: number | null
@@ -95,23 +96,32 @@ export class FudaiService {
   async finalizeParticipationIfDetected(): Promise<FudaiGrabResult | null> {
     const result = await this.checkParticipateResult()
     if (result.participated) {
+      const remainingSeconds = this.latestLotteryRight?.remainingSeconds ?? 1
+      const drawAt =
+        this.latestLotteryRight?.drawAt ??
+        (typeof remainingSeconds === 'number' && remainingSeconds > 0 ? Date.now() + remainingSeconds * 1000 : Date.now() + 1000)
       this.handleParticipated(
         {
           type: 'all',
           requiresFollow: false,
           requiresFanBadge: false,
           requiresComment: false,
+          requiresShare: false,
           commentText: '',
           fanBadgeCost: 1,
           description: '关闭前确认已参与',
-          remainingSeconds: 1,
-          drawAt: Date.now() + 1000
+          remainingSeconds,
+          drawAt
         },
         result
       )
       return result
     }
     return result.won || result.resultText ? result : null
+  }
+
+  async getLatestResultSnapshot(): Promise<FudaiGrabResult> {
+    return this.checkParticipateResult()
   }
 
   private setupWebSocketListener(): void {
@@ -155,13 +165,14 @@ export class FudaiService {
           requiresFollow: info.requiresFollow,
           requiresFanBadge: info.requiresFanBadge,
           requiresComment: info.requiresComment,
+          requiresShare: info.requiresShare,
           commentText: info.commentText,
           fanBadgeCost: info.fanBadgeCost,
           remainingSeconds: info.remainingSeconds,
           drawAt: info.drawAt
         })
         this.callbacks.onLog(
-          `已获取福袋任务信息：关注=${info.requiresFollow ? '是' : '否'}，粉丝团=${info.requiresFanBadge ? '是' : '否'}，评论=${info.requiresComment ? '是' : '否'}，剩余=${info.remainingSeconds ?? '未知'}秒`
+          `已获取福袋任务信息：关注=${info.requiresFollow ? '是' : '否'}，粉丝团=${info.requiresFanBadge ? '是' : '否'}，评论=${info.requiresComment ? '是' : '否'}，分享=${info.requiresShare ? '是' : '否'}，剩余=${info.remainingSeconds ?? '未知'}秒`
         )
       }
     })
@@ -254,6 +265,7 @@ export class FudaiService {
 
       const previousLotteryRight = this.latestLotteryRight
       this.latestLotteryRight = null
+      this.debugLog(`开始处理福袋: source=${source}, type=${info.type}, remaining=${info.remainingSeconds ?? 'unknown'}, comment=${info.requiresComment ? 'yes' : 'no'}, fanBadge=${info.requiresFanBadge ? 'yes' : 'no'}`)
       const clicked = await this.clickVisibleFudaiIcon()
       if (!clicked) {
         this.latestLotteryRight = previousLotteryRight
@@ -266,6 +278,7 @@ export class FudaiService {
       await this.waitForLotteryPanelOrRightInfo(6000)
       if (!this.latestLotteryRight && previousLotteryRight && source === 'websocket') this.latestLotteryRight = previousLotteryRight
       if (!this.latestLotteryRight) {
+        await this.debugLotteryContext('点击福袋后未获取任务接口')
         this.callbacks.onFudaiSkipped('未获取到福袋任务接口，可能点击到普通红包或非福袋入口')
         this.failureCooldownUntil = Date.now() + FAILURE_COOLDOWN_MS
         return
@@ -275,8 +288,13 @@ export class FudaiService {
       const enrichedInfo = await this.enrichInfoFromPage(info)
       this.callbacks.onFudaiInfoUpdated(enrichedInfo)
       this.callbacks.onLog(
-        `准备执行福袋任务：关注=${enrichedInfo.requiresFollow ? '是' : '否'}，粉丝团=${enrichedInfo.requiresFanBadge ? '是' : '否'}，评论=${enrichedInfo.requiresComment ? '是' : '否'}，口令=${enrichedInfo.commentText || '无'}`
+        `准备执行福袋任务：关注=${enrichedInfo.requiresFollow ? '是' : '否'}，粉丝团=${enrichedInfo.requiresFanBadge ? '是' : '否'}，评论=${enrichedInfo.requiresComment ? '是' : '否'}，分享=${enrichedInfo.requiresShare ? '是' : '否'}，口令=${enrichedInfo.commentText || '无'}`
       )
+      if (enrichedInfo.requiresShare) {
+        this.callbacks.onFudaiSkipped('福袋要求分享直播间，暂不支持，已跳过')
+        this.failureCooldownUntil = Date.now() + FAILURE_COOLDOWN_MS
+        return
+      }
       if (enrichedInfo.requiresFollow && !enrichedInfo.requiresFanBadge) await this.handleFollowRequirement()
       if (!this.canWork()) return
 
@@ -305,6 +323,7 @@ export class FudaiService {
       requiresFollow: false,
       requiresFanBadge: false,
       requiresComment: false,
+      requiresShare: false,
       commentText: '',
       fanBadgeCost: 1,
       description,
@@ -339,6 +358,10 @@ export class FudaiService {
       requiresFollow: info.requiresFollow || Boolean(rightInfo?.requiresFollow) || /关注/.test(pageInfo.text),
       requiresFanBadge: info.requiresFanBadge || Boolean(rightInfo?.requiresFanBadge) || /粉丝团|灯牌|加入粉丝/.test(pageInfo.text),
       requiresComment: info.requiresComment || Boolean(rightInfo?.requiresComment) || /口令|评论|发送指定/.test(pageInfo.text),
+      requiresShare:
+        info.requiresShare ||
+        Boolean(rightInfo?.requiresShare) ||
+        /参与条件.{0,120}分享|分享直播间.{0,80}(?:未达成|参与)|分享.{0,40}(?:未达成|任务)/.test(pageInfo.text),
       commentText: info.commentText || rightInfo?.commentText || pageInfo.comment,
       fanBadgeCost: Math.max(1, info.fanBadgeCost || rightInfo?.fanBadgeCost || pageInfo.cost || 1),
       remainingSeconds: info.remainingSeconds ?? rightInfo?.remainingSeconds ?? domInfo.remainingSeconds,
@@ -421,21 +444,38 @@ export class FudaiService {
   }
 
   private async clickVisibleFudaiIcon(): Promise<boolean> {
+    if (await this.clickShortTouchFudaiEntry()) return true
+
     const handles = await this.page.locator(SELECTORS.fudaiIcon).elementHandles().catch(() => [])
     const candidates: Array<{ handle: ElementHandle<Node>; score: number }> = []
+    const debugCandidates: Array<{ text: string; x: number; y: number; w: number; h: number; score: number }> = []
     for (const handle of handles) {
       if (!(await this.isElementVisible(handle))) continue
       const score = await this.scoreFudaiEntry(handle)
       if (score <= 0) continue
       candidates.push({ handle, score })
+      if (this.debugEnabled()) {
+        const debug = await this.describeElementForDebug(handle, score)
+        if (debug) debugCandidates.push(debug)
+      }
     }
 
     candidates.sort((a, b) => b.score - a.score)
+    this.debugLog(`通用福袋入口候选数量: ${candidates.length}/${handles.length}`)
+    if (this.debugEnabled()) {
+      this.callbacks.onLog(`[debug] 通用福袋入口候选: ${JSON.stringify(debugCandidates.sort((a, b) => b.score - a.score).slice(0, 8)).slice(0, 900)}`)
+    }
 
     for (const { handle } of candidates) {
       const beforeUrl = this.page.url()
       try {
-        await handle.click({ timeout: 3000 })
+        const clickPoint = await this.getFudaiEntryClickPoint(handle)
+        if (!clickPoint) {
+          this.debugLog('通用福袋入口候选无法计算安全点击点，跳过')
+          continue
+        }
+        this.debugLog(`尝试点击通用福袋入口: x=${Math.round(clickPoint.x)}, y=${Math.round(clickPoint.y)}`)
+        await this.page.mouse.click(clickPoint.x, clickPoint.y)
         await this.page.waitForTimeout(300).catch(() => {})
         if (this.page.url() !== beforeUrl) {
           this.callbacks.onLog('点击福袋入口后页面发生跳转，尝试返回直播间')
@@ -456,14 +496,256 @@ export class FudaiService {
     return false
   }
 
+  private async clickShortTouchFudaiEntry(): Promise<boolean> {
+    const beforeUrl = this.page.url()
+    const point = await this.page
+      .evaluate(() => {
+        const normalize = (text: string) => text.replace(/\s+/g, ' ').trim()
+        const viewportArea = Math.max(1, window.innerWidth * window.innerHeight)
+        const isVisible = (element: Element) => {
+          const style = window.getComputedStyle(element)
+          const rect = element.getBoundingClientRect()
+          return (
+            style.display !== 'none' &&
+            style.visibility !== 'hidden' &&
+            Number(style.opacity || 1) > 0.05 &&
+            rect.width >= 8 &&
+            rect.height >= 8 &&
+            rect.bottom > 0 &&
+            rect.right > 0 &&
+            rect.top < window.innerHeight &&
+            rect.left < window.innerWidth &&
+            (rect.width * rect.height) / viewportArea <= 0.12
+          )
+        }
+        const attrText = (element: Element) =>
+          normalize(
+            [
+              element.id || '',
+              String(element.className || ''),
+              element.getAttribute('data-extra') || '',
+              element.getAttribute('data-short-touch-landing') || '',
+              element.getAttribute('data-e2e') || '',
+              element.getAttribute('aria-label') || '',
+              element.getAttribute('alt') || ''
+            ].join(' ')
+          )
+        const elementText = (element: Element) =>
+          normalize([attrText(element), element.textContent || ''].join(' '))
+        const isCloseLike = (element: Element) => /close|lottery_close|关闭|取消/i.test(attrText(element))
+        const hasCountdown = (text: string) => /\b\d{1,2}:\d{2}\b/.test(text)
+        const hasFudaiSignal = (text: string) =>
+          /福袋|超级福袋|粉丝福袋|fudai|luck.?bag|lucky.?bag|short_touch_land_lottery|lottery_land/i.test(text)
+        const hasOtherPacketSignal = (text: string) => /红包|red.?packet/i.test(text) && !/福袋|fudai|luck.?bag/i.test(text)
+        const subtreeText = (element: Element) => normalize([attrText(element), element.textContent || ''].join(' '))
+        const ancestorText = (element: Element, maxDepth = 5) => {
+          const parts: string[] = []
+          let current: Element | null = element
+          for (let depth = 0; current && depth < maxDepth; depth++) {
+            parts.push(subtreeText(current))
+            if (current.id === 'ShortTouchLayout') break
+            current = current.parentElement
+          }
+          return parts.join(' ')
+        }
+        const findClickableShortTouchCard = (element: Element) => {
+          let best: Element | null = null
+          let current: Element | null = element
+          for (let depth = 0; current && depth < 5; depth++) {
+            if (current.id === 'ShortTouchLayout') break
+            if (!isVisible(current) || isCloseLike(current)) {
+              current = current.parentElement
+              continue
+            }
+            const rect = current.getBoundingClientRect()
+            const text = subtreeText(current)
+            if (hasOtherPacketSignal(text)) {
+              current = current.parentElement
+              continue
+            }
+            if (rect.width <= 430 && rect.height <= 190) best = current
+            current = current.parentElement
+          }
+          return best
+        }
+
+        const roots = Array.from(
+          document.querySelectorAll(
+            [
+              '#ShortTouchLayout [data-short-touch-landing]',
+              '#ShortTouchLayout [id*="lottery"]',
+              '#ShortTouchLayout [class*="ShortTouchContainer"]',
+              '#ShortTouchLayout .ycjwPFJI',
+              '#ShortTouchLayout [class*="countdown"]'
+            ].join(', ')
+          )
+        )
+        const candidates: Array<{ element: Element; score: number; area: number }> = []
+
+        for (const root of roots) {
+          if (!isVisible(root) || isCloseLike(root)) continue
+          const context = ancestorText(root)
+          const explicitFudai = hasFudaiSignal(context)
+          const countdown = hasCountdown(context)
+          const otherPacket = hasOtherPacketSignal(context)
+          if (!countdown || otherPacket) continue
+
+          const card = findClickableShortTouchCard(root)
+          if (!card) continue
+          const rect = card.getBoundingClientRect()
+          const attr = attrText(card)
+          const text = subtreeText(card)
+          const score =
+            (/short_touch_land_lottery|lottery_land/i.test(attr) ? 180 : 0) +
+            (explicitFudai ? 130 : 0) +
+            (/福袋|fudai|luck.?bag|lucky.?bag/i.test(text) ? 80 : 0) +
+            (countdown ? 70 : 0) +
+            (root.classList.contains('ycjwPFJI') ? 35 : 0) -
+            (!explicitFudai ? 25 : 0) -
+            (rect.width > 280 || rect.height > 130 ? 20 : 0)
+          candidates.push({ element: card, score, area: rect.width * rect.height })
+        }
+
+        const best = candidates.sort((a, b) => b.score - a.score || a.area - b.area)[0]
+        ;(window as any).__luckBagDebugCandidates = candidates.slice(0, 8).map(({ element, score, area }) => {
+          const rect = element.getBoundingClientRect()
+          return {
+            text: subtreeText(element).slice(0, 100),
+            x: Math.round(rect.left),
+            y: Math.round(rect.top),
+            w: Math.round(rect.width),
+            h: Math.round(rect.height),
+            area: Math.round(area),
+            score
+          }
+        })
+        if (!best) return null
+        const rect = best.element.getBoundingClientRect()
+        return {
+          x: Math.min(window.innerWidth - 2, Math.max(2, rect.left + rect.width / 2)),
+          y: Math.min(window.innerHeight - 2, Math.max(2, rect.top + rect.height / 2))
+        }
+      })
+      .catch(() => null)
+
+    await this.logDebugCandidates('ShortTouch福袋入口')
+    if (!point) return false
+    try {
+      this.debugLog(`尝试点击 ShortTouch 福袋入口: x=${Math.round(point.x)}, y=${Math.round(point.y)}`)
+      await this.page.mouse.click(point.x, point.y)
+      await this.page.waitForTimeout(300).catch(() => {})
+      if (this.page.url() !== beforeUrl) {
+        this.callbacks.onLog('点击福袋入口后页面发生跳转，尝试返回直播间')
+        await this.page.goBack({ waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {})
+        return false
+      }
+      if (await this.waitForLotteryClickResult(2200)) {
+        this.callbacks.onLog('已点击 ShortTouch 福袋入口')
+        return true
+      }
+      this.debugLog('ShortTouch 入口点击后未确认福袋接口或福袋面板，交给后续入口候选继续尝试')
+    } catch (e: any) {
+      this.debugLog(`ShortTouch 福袋入口点击失败: ${e.message}`)
+    }
+    return false
+  }
+
   private async isLikelyFudaiEntry(handle: ElementHandle<Node>): Promise<boolean> {
     return (await this.scoreFudaiEntry(handle)) > 0
+  }
+
+  private async getFudaiEntryClickPoint(handle: ElementHandle<Node>): Promise<{ x: number; y: number } | null> {
+    return handle
+      .evaluate((node) => {
+        if (!(node instanceof Element)) return null
+        const viewportArea = Math.max(1, window.innerWidth * window.innerHeight)
+        const normalize = (text: string) => text.replace(/\s+/g, ' ').trim()
+        const isVisible = (element: Element) => {
+          const style = window.getComputedStyle(element)
+          const rect = element.getBoundingClientRect()
+          return (
+            style.display !== 'none' &&
+            style.visibility !== 'hidden' &&
+            Number(style.opacity || 1) > 0.05 &&
+            rect.width >= 8 &&
+            rect.height >= 8 &&
+            rect.bottom > 0 &&
+            rect.right > 0 &&
+            rect.top < window.innerHeight &&
+            rect.left < window.innerWidth &&
+            (rect.width * rect.height) / viewportArea <= 0.12
+          )
+        }
+        const attrText = (element: Element) =>
+          normalize(
+            [
+              element.id || '',
+              String(element.className || ''),
+              element.getAttribute('data-extra') || '',
+              element.getAttribute('data-short-touch-landing') || '',
+              element.getAttribute('data-e2e') || '',
+              element.getAttribute('aria-label') || '',
+              element.getAttribute('alt') || ''
+            ].join(' ')
+          )
+        const contextText = (element: Element) => {
+          const parts: string[] = []
+          let current: Element | null = element
+          for (let depth = 0; current && depth < 5; depth++) {
+            parts.push(attrText(current))
+            parts.push(normalize(current.textContent || ''))
+            if (current.id === 'ShortTouchLayout') parts.push('ShortTouchLayout')
+            current = current.parentElement
+          }
+          return parts.join(' ')
+        }
+
+        const candidates: Array<{ element: Element; score: number; area: number }> = []
+        let current: Element | null = node
+        for (let depth = 0; current && depth < 5; depth++) {
+          if (isVisible(current)) {
+            const rect = current.getBoundingClientRect()
+            const own = `${attrText(current)} ${normalize(current.textContent || '')}`
+            const ctx = `${own} ${contextText(current)}`
+            if (!/close|lottery_close|关闭|取消/i.test(own)) {
+              const explicitFudai = /福袋|超级福袋|粉丝福袋|fudai|luck.?bag/i.test(ctx)
+              const shortTouchLottery = /ShortTouchLayout/.test(ctx) && /short_touch_land_lottery|lottery_land|luck.?bag|fudai/i.test(ctx)
+              const shortTouchCountdown = /ShortTouchLayout/.test(ctx) && /\b\d{1,2}:\d{2}\b/.test(ctx)
+              const otherPacket = /红包|red.?packet/i.test(ctx) && !explicitFudai
+              const genericLottery = /\blottery\b/i.test(ctx) && !explicitFudai && !shortTouchLottery
+              const largeContainer = rect.width > 420 || rect.height > 180
+              if (!otherPacket && !genericLottery && !largeContainer && (explicitFudai || shortTouchLottery || shortTouchCountdown)) {
+                const score =
+                  (shortTouchLottery ? 160 : 0) +
+                  (explicitFudai ? 90 : 0) +
+                  (shortTouchCountdown ? 30 : 0) +
+                  (/福袋|fudai|luck.?bag/i.test(own) ? 40 : 0) -
+                  (/红包|red.?packet/i.test(ctx) ? 80 : 0)
+                if (score > 0) candidates.push({ element: current, score, area: rect.width * rect.height })
+              }
+            }
+          }
+          current = current.parentElement
+        }
+
+        const best = candidates.sort((a, b) => b.score - a.score || a.area - b.area)[0]
+        if (!best) return null
+        const rect = best.element.getBoundingClientRect()
+        return {
+          x: Math.min(window.innerWidth - 2, Math.max(2, rect.left + rect.width / 2)),
+          y: Math.min(window.innerHeight - 2, Math.max(2, rect.top + rect.height / 2))
+        }
+      })
+      .catch(() => null)
   }
 
   private async scoreFudaiEntry(handle: ElementHandle<Node>): Promise<number> {
     return handle
       .evaluate((node) => {
         if (!(node instanceof Element)) return 0
+        const viewportArea = Math.max(1, window.innerWidth * window.innerHeight)
+        const rect = node.getBoundingClientRect()
+        if (rect.width > 520 || rect.height > 220 || (rect.width * rect.height) / viewportArea > 0.14) return 0
         const normalize = (text: string) => text.replace(/\s+/g, ' ').trim()
         const idClass = `${node.id || ''} ${String(node.className || '')}`
         if (/close|lottery_close|关闭|取消/i.test(idClass)) return 0
@@ -520,11 +802,18 @@ export class FudaiService {
   private async waitForLotteryClickResult(timeoutMs: number): Promise<boolean> {
     const startedAt = Date.now()
     while (Date.now() - startedAt < timeoutMs && this.canWork()) {
-      if (this.latestLotteryRight) return true
+      if (this.latestLotteryRight) {
+        this.debugLog('点击入口后已捕获福袋任务接口')
+        return true
+      }
       const hasPanel = await this.hasLotteryPanelSignal()
-      if (hasPanel) return true
+      if (hasPanel) {
+        this.debugLog('点击入口后已检测到福袋面板信号')
+        return true
+      }
       await this.page.waitForTimeout(250).catch(() => {})
     }
+    this.debugLog(`点击入口后 ${timeoutMs}ms 内未捕获福袋接口或面板`)
     return false
   }
 
@@ -669,7 +958,11 @@ export class FudaiService {
       }, options)
       .catch(() => null)
 
-    if (!target) return false
+    if (!target) {
+      await this.logDebugCandidates(options.logLabel)
+      this.debugLog(`未找到${options.logLabel}按钮`)
+      return false
+    }
     await this.logDebugCandidates(options.logLabel)
     await this.page.mouse.click(target.x, target.y)
     this.callbacks.onLog(`已点击${options.logLabel}: ${target.text.slice(0, 30)}`)
@@ -1069,34 +1362,14 @@ export class FudaiService {
         this.callbacks.onLog(`已完成评论任务: ${text}`)
         return true
       }
-      this.debugLog('一键发评论后未确认任务完成，尝试手动评论兜底')
-    }
-
-    const startedAt = Date.now()
-    const inputTarget = await this.findCommentInputTarget()
-    if (!inputTarget) {
-      this.callbacks.onFudaiSkipped('未找到可用评论输入框')
+      this.callbacks.onFudaiSkipped('福袋弹窗评论按钮点击后未确认任务完成，停止本次参与，避免直接向直播间发送评论')
       this.failureCooldownUntil = Date.now() + FAILURE_COOLDOWN_MS
       return false
     }
 
-    await this.page.mouse.click(inputTarget.x, inputTarget.y)
-    await this.randomDelay(200, 400)
-    await this.page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => {})
-    await this.page.keyboard.type(text, { delay: 35 })
-    await this.randomDelay(200, 400)
-    await this.page.keyboard.press('Enter')
-    this.callbacks.onLog(`已发送评论: ${text}`)
-
-    const ok = await this.waitForCommentSatisfied(startedAt, 8000)
-    if (!ok) {
-      this.callbacks.onFudaiSkipped('评论发送后未确认任务完成，停止本次参与')
-      this.failureCooldownUntil = Date.now() + FAILURE_COOLDOWN_MS
-      return false
-    }
-
-    this.callbacks.onLog(`已确认评论任务完成: ${text}`)
-    return true
+    this.callbacks.onFudaiSkipped('未找到福袋弹窗内的一键评论按钮，已跳过，避免先向直播间输入评论')
+    this.failureCooldownUntil = Date.now() + FAILURE_COOLDOWN_MS
+    return false
   }
 
   private async findCommentInputTarget(): Promise<{ x: number; y: number; text: string } | null> {
@@ -1229,16 +1502,30 @@ export class FudaiService {
   }
 
   private handleParticipated(info: FudaiInfo, result: FudaiGrabResult): void {
+    const effectiveRemaining =
+      this.latestLotteryRight?.remainingSeconds ??
+      (typeof info.drawAt === 'number' && info.drawAt > Date.now()
+        ? Math.ceil((info.drawAt - Date.now()) / 1000)
+        : info.remainingSeconds)
+    const effectiveDrawAt =
+      this.latestLotteryRight?.drawAt ??
+      info.drawAt ??
+      (typeof effectiveRemaining === 'number' && effectiveRemaining > 0 ? Date.now() + effectiveRemaining * 1000 : null)
+    const effectiveInfo: FudaiInfo = {
+      ...info,
+      remainingSeconds: effectiveRemaining,
+      drawAt: effectiveDrawAt
+    }
     const participationKey = this.getParticipationKey(info)
     const waitMs =
-      typeof info.remainingSeconds === 'number' && info.remainingSeconds > 0
-        ? info.remainingSeconds * 1000 + AFTER_DRAW_BUFFER_MS
+      typeof effectiveInfo.remainingSeconds === 'number' && effectiveInfo.remainingSeconds > 0
+        ? effectiveInfo.remainingSeconds * 1000 + AFTER_DRAW_BUFFER_MS
         : DEFAULT_AFTER_PARTICIPATE_WAIT_MS
     this.participatedCooldownUntil = Date.now() + waitMs
     if (this.reportedParticipationKeys.has(participationKey)) return
     this.reportedParticipationKeys.add(participationKey)
     this.callbacks.onLog(`已参与福袋，等待开奖约 ${Math.ceil(waitMs / 1000)} 秒`)
-    this.callbacks.onFudaiGrabbed(info, result)
+    this.callbacks.onFudaiGrabbed(effectiveInfo, result)
   }
 
   private getParticipationKey(info: FudaiInfo): string {
@@ -1343,7 +1630,9 @@ export class FudaiService {
   private async checkParticipateResult(): Promise<FudaiGrabResult> {
     const resultText = await this.page.evaluate(() => document.body.innerText.slice(0, 6000)).catch(() => '')
     const compactText = resultText.replace(/\s+/g, ' ')
-    const participated = /参与成功|已参与|报名成功|等待开奖|成功参与|已成功参与/.test(compactText)
+    const participated =
+      /参与成功|报名成功|等待开奖|成功参与|已成功参与/.test(compactText) ||
+      /(?:福袋|抽奖).{0,120}已参与|已参与.{0,120}(?:福袋|开奖|等待)/.test(compactText)
     const won = /恭喜.{0,30}(?:中奖|获得|抽中)|你已中奖|您已中奖|中奖成功|获得奖品/.test(compactText)
     const hasCoupon = /优惠券|券|coupon/i.test(compactText)
     const hasDiamond = /钻石|抖币|diamond/i.test(compactText)
@@ -1408,6 +1697,7 @@ export class FudaiService {
     const commentCondition = conditions.find((condition: any) => Number(condition.type) === 3 || /口令|评论|发送/.test(String(condition.description || condition.content || '')))
     const fanBadgeCondition = conditions.find((condition: any) => Number(condition.type) === 8 || /粉丝团|灯牌/.test(String(condition.description || condition.content || '')))
     const followCondition = conditions.find((condition: any) => Number(condition.type) === 1 || /关注/.test(String(condition.description || condition.content || '')))
+    const shareCondition = conditions.find((condition: any) => Number(condition.type) === 4 || /分享/.test(String(condition.description || condition.content || '')))
     if (!followCondition) userCondition.has_follow = true
     if (!commentCondition) userCondition.has_command = true
     if (!fanBadgeCondition || userCondition.is_fansclub_member === true) {
@@ -1448,6 +1738,7 @@ export class FudaiService {
         userCondition.is_fansclub_member === false &&
         (/粉丝团|灯牌|fans|club/i.test(conditionText) || userCondition.fansclub_status_active === false),
       requiresComment: userCondition.has_command === false || /口令|评论|发送/.test(conditionText),
+      requiresShare: Boolean(shareCondition) || /分享/.test(conditionText),
       commentText: commandText,
       fanBadgeCost: Math.max(1, Number(conditionText.match(/(\d{1,3})\s*(?:钻石|抖币)/)?.[1] || 1)),
       remainingSeconds,
@@ -1529,6 +1820,65 @@ export class FudaiService {
 
   private debugLog(message: string): void {
     if (this.debugEnabled()) this.callbacks.onLog(`[debug] ${message}`)
+  }
+
+  private async describeElementForDebug(
+    handle: ElementHandle<Node>,
+    score: number
+  ): Promise<{ text: string; x: number; y: number; w: number; h: number; score: number } | null> {
+    if (!this.debugEnabled()) return null
+    return handle
+      .evaluate(
+        (node, entryScore) => {
+          if (!(node instanceof Element)) return null
+          const rect = node.getBoundingClientRect()
+          const normalize = (text: string) => text.replace(/\s+/g, ' ').trim()
+          const attrText = [
+            node.id || '',
+            String(node.className || ''),
+            node.getAttribute('data-extra') || '',
+            node.getAttribute('data-short-touch-landing') || '',
+            node.getAttribute('data-e2e') || '',
+            node.getAttribute('aria-label') || '',
+            node.getAttribute('alt') || ''
+          ].join(' ')
+          return {
+            text: normalize(`${attrText} ${node.textContent || ''}`).slice(0, 100),
+            x: Math.round(rect.left),
+            y: Math.round(rect.top),
+            w: Math.round(rect.width),
+            h: Math.round(rect.height),
+            score: entryScore
+          }
+        },
+        score
+      )
+      .catch(() => null)
+  }
+
+  private async debugLotteryContext(label: string): Promise<void> {
+    if (!this.debugEnabled()) return
+    const context = await this.page
+      .evaluate(() => {
+        const normalize = (text: string) => text.replace(/\s+/g, ' ').trim()
+        const text = normalize(document.body.innerText || '')
+        const panels = Array.from(
+          document.querySelectorAll('[role="dialog"], [class*="modal"], [class*="popup"], [class*="panel"], [data-extra*="short_touch"], #ShortTouchLayout')
+        )
+          .map((node) => normalize(node.textContent || ''))
+          .filter(Boolean)
+          .sort((a, b) => b.length - a.length)
+          .slice(0, 3)
+        return {
+          hasFudaiText: /福袋/.test(text),
+          hasRedPacketText: /红包|red.?packet/i.test(text),
+          hasLotteryTaskText: /参与条件|发送评论|加入粉丝团|点亮粉丝团|参与福袋|已参与|等待开奖/.test(text),
+          hasCountdownText: /\b\d{1,2}:\d{2}\b/.test(text),
+          panels: panels.map((value) => value.slice(0, 220))
+        }
+      })
+      .catch((e: any) => ({ error: e?.message || String(e) }))
+    this.callbacks.onLog(`[debug] ${label}页面上下文: ${JSON.stringify(context).slice(0, 900)}`)
   }
 
   private async logDebugCandidates(label: string): Promise<void> {

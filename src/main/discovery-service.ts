@@ -38,6 +38,7 @@ export interface VerifyRoomResult {
 
 export interface VerifyRoomOptions {
   keepPageOnVerified?: boolean
+  minDwellMs?: number
 }
 
 interface CountdownEvidence {
@@ -58,8 +59,8 @@ interface SignalSample {
 
 const DEFAULT_SOURCE_URLS = ['https://live.douyin.com']
 const DEFAULT_MAX_ROOMS = 20
-const VERIFY_DWELL_MIN_MS = 20000
-const VERIFY_DWELL_MAX_MS = 32000
+const VERIFY_DWELL_MIN_MS = 18000
+const VERIFY_DWELL_MAX_MS = 25000
 const VERIFY_SAMPLE_INTERVAL_MS = 5000
 const VERIFY_MAX_REASONABLE_REMAINING_SECONDS = 15 * 60
 const FUDAI_ENTRY_SELECTOR = [
@@ -239,7 +240,8 @@ export class DiscoveryService {
         room,
         matchedSignals,
         () => websocketRemainingSeconds,
-        () => this.pickBestNetworkCountdown(networkCountdowns)
+        () => this.pickBestNetworkCountdown(networkCountdowns),
+        options.minDwellMs || 0
       )
 
       const challenge = await this.getChallengeReason(page)
@@ -517,14 +519,17 @@ export class DiscoveryService {
     fallback: DiscoveredRoom,
     matchedSignals: Set<string>,
     getWebsocketRemainingSeconds: () => number | null,
-    getNetworkCountdown: () => CountdownEvidence | null
+    getNetworkCountdown: () => CountdownEvidence | null,
+    minDwellMs: number
   ): Promise<SignalSample> {
     const startedAt = Date.now()
     const dwellMs = this.randomBetween(VERIFY_DWELL_MIN_MS, VERIFY_DWELL_MAX_MS)
+    const requiredDwellMs = Math.min(dwellMs, Math.max(0, Math.floor(minDwellMs)))
     let bestResult = await this.evaluateFudaiSignals(page, fallback)
     bestResult.matchedSignals.forEach((signal) => matchedSignals.add(signal))
 
     while (Date.now() - startedAt < dwellMs) {
+      const elapsedMs = Date.now() - startedAt
       const remainingSeconds =
         getWebsocketRemainingSeconds() ??
         getNetworkCountdown()?.remainingSeconds ??
@@ -538,7 +543,7 @@ export class DiscoveryService {
         (matchedSignals.has('text') && matchedSignals.has('lottery-text')) ||
         hasTaskCountdownSignal
 
-      if ((score >= 6 && hasStrongSignal) || (score >= 4 && hasTaskCountdownSignal)) break
+      if (elapsedMs >= requiredDwellMs && ((score >= 6 && hasStrongSignal) || (score >= 4 && hasTaskCountdownSignal))) break
 
       await page.waitForTimeout(Math.min(VERIFY_SAMPLE_INTERVAL_MS, Math.max(1000, dwellMs - (Date.now() - startedAt))))
       await this.simulateLightRead(page)

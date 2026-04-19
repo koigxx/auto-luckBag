@@ -5,7 +5,7 @@ import { store } from './store'
 import { logError, logInfo } from './logger'
 
 const AFTER_DRAW_NO_WIN_CLOSE_DELAY_SECONDS = 3
-const AFTER_DRAW_WIN_CLOSE_DELAY_SECONDS = 10
+const AFTER_DRAW_WIN_RESULT_TIMEOUT_SECONDS = 25
 
 export type RoomStatus = 'loading' | 'monitoring' | 'grabbing' | 'error' | 'idle'
 
@@ -245,9 +245,6 @@ export class RoomManager {
       },
       onFudaiInfoUpdated: (info) => {
         this.updateRoomFudaiTiming(room, info.remainingSeconds, info.drawAt)
-        if (room.fudaiCount === 0) {
-          void room.fudaiService?.finalizeParticipationIfDetected().catch(() => {})
-        }
       },
       onFudaiGrabbed: (info, result) => {
         room.fudaiCount++
@@ -256,7 +253,7 @@ export class RoomManager {
           room,
           info.remainingSeconds,
           info.drawAt,
-          result.won ? AFTER_DRAW_WIN_CLOSE_DELAY_SECONDS : AFTER_DRAW_NO_WIN_CLOSE_DELAY_SECONDS
+          AFTER_DRAW_NO_WIN_CLOSE_DELAY_SECONDS
         )
         if (result.won && (result.prizeType === 'physical' || result.prizeType === 'diamond')) {
           this.log(room.id, `识别到中奖: ${result.prizeType}`)
@@ -269,6 +266,15 @@ export class RoomManager {
       },
       onFudaiSkipped: (reason) => {
         this.log(room.id, `跳过福袋: ${reason}`)
+        if (/分享直播间|要求分享|分享/.test(reason)) {
+          this.log(room.id, '检测到分享任务，结束当前直播间监控')
+          setTimeout(() => {
+            void this.removeRoom(room.id).catch((e: any) => {
+              this.log(room.id, `关闭分享任务直播间失败: ${e.message}`)
+            })
+          }, 0)
+          return
+        }
         room.status = 'monitoring'
         this.notifyUpdate(room)
       },
@@ -317,8 +323,7 @@ export class RoomManager {
   private scheduleAutoCloseAfterDraw(
     roomId: string,
     roomName: string,
-    delaySeconds: number,
-    extendedForWin = false
+    delaySeconds: number
   ): void {
     const existing = this.autoCloseTimers.get(roomId)
     if (existing) clearTimeout(existing)
@@ -328,13 +333,16 @@ export class RoomManager {
         const room = this.rooms.get(roomId)
         if (!room) return
         const finalResult = await room.fudaiService?.finalizeParticipationIfDetected().catch(() => null)
-        if (finalResult?.won && !extendedForWin) {
-          const extraDelay = Math.max(
-            1,
-            AFTER_DRAW_WIN_CLOSE_DELAY_SECONDS - AFTER_DRAW_NO_WIN_CLOSE_DELAY_SECONDS
-          )
-          this.log(roomId, `识别到中奖结果，延迟 ${extraDelay} 秒后关闭直播间以完成统计`)
-          this.scheduleAutoCloseAfterDraw(roomId, roomName, extraDelay, true)
+        if (finalResult?.won) {
+          const completed = await this.waitForWinningResult(roomId, roomName)
+          if (completed) {
+            this.log(roomId, `中奖信息已解析完成，关闭直播间: ${roomName}`)
+          } else {
+            this.log(roomId, `中奖信息等待超过 ${AFTER_DRAW_WIN_RESULT_TIMEOUT_SECONDS} 秒，关闭直播间: ${roomName}`)
+          }
+          await this.removeRoom(roomId).catch((e: any) => {
+            this.log(roomId, `关闭开奖后直播间失败: ${e.message}`)
+          })
           return
         }
         this.log(roomId, `福袋开奖等待结束，关闭直播间: ${roomName}`)
@@ -347,6 +355,35 @@ export class RoomManager {
     timer.unref?.()
     this.autoCloseTimers.set(roomId, timer)
     this.log(roomId, `已安排开奖后自动关闭，约 ${delaySeconds} 秒后执行`)
+  }
+
+  private async waitForWinningResult(roomId: string, roomName: string): Promise<boolean> {
+    const startedAt = Date.now()
+    this.log(roomId, `识别到中奖结果，等待中奖信息解析，最长 ${AFTER_DRAW_WIN_RESULT_TIMEOUT_SECONDS} 秒`)
+
+    while (Date.now() - startedAt < AFTER_DRAW_WIN_RESULT_TIMEOUT_SECONDS * 1000) {
+      const room = this.rooms.get(roomId)
+      if (!room?.fudaiService) return false
+      const result = await room.fudaiService.getLatestResultSnapshot().catch(() => null)
+      if (result?.won && this.isWinningResultComplete(result)) {
+        this.log(roomId, `中奖信息解析完成: ${result.prizeType}${result.diamondAmount ? `，${result.diamondAmount}钻石` : ''}`)
+        return true
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+    }
+
+    const room = this.rooms.get(roomId)
+    const result = await room?.fudaiService?.getLatestResultSnapshot().catch(() => null)
+    if (result?.won) {
+      this.log(roomId, `中奖信息超时前最后识别结果: ${result.resultText || roomName}`)
+    }
+    return false
+  }
+
+  private isWinningResultComplete(result: FudaiGrabResult): boolean {
+    if (!result.won) return false
+    if (result.prizeType === 'diamond') return result.diamondAmount > 0
+    return result.prizeType === 'physical' || result.prizeType === 'coupon' || result.prizeType === 'unknown'
   }
 
   private recordPreferredRoom(room: Room): void {

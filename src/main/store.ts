@@ -50,9 +50,9 @@ const defaults: AppConfig = {
   allowDiamondProfit: false,
   autoFollow: true,
   debugLogs: false,
-  scanIntervalSeconds: 50,
-  enterBeforeSeconds: 90,
-  candidatePoolLimit: 5,
+  scanIntervalSeconds: 35,
+  enterBeforeSeconds: 65,
+  candidatePoolLimit: 4,
   rooms: [],
   preferredRooms: [],
   runStats: {

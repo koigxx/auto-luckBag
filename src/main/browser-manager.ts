@@ -7,7 +7,7 @@ export class BrowserManager {
   private context: BrowserContext | null = null
   private storageStatePath: string | null = null
   private sourceNavQueue = new MinIntervalQueue(15000, 25000)
-  private liveRoomVerifyNavQueue = new MinIntervalQueue(45000, 70000)
+  private liveRoomVerifyNavQueue = new MinIntervalQueue(40000, 55000)
   private liveRoomEnterNavQueue = new MinIntervalQueue(4000, 9000)
 
   setStorageStatePath(path: string): void {

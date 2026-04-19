@@ -10,6 +10,8 @@
     "typecheck": "vue-tsc -b",
     "build": "electron-vite build",
     "build:win": "npm run build && electron-builder --win",
+    "build:win:dir": "npm run build && electron-builder --win --dir",
+    "build:win:cn": "npm run build && set ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/&& electron-builder --win",
     "preview": "electron-vite preview",
     "postinstall": "electron-builder install-app-deps"
   },

@@ -55,9 +55,11 @@ function formatRemaining(seconds: number | null): string {
         {{ statusLabel(room.status, t) }}
       </span>
       <span v-if="room.hasFanBadge" class="fan-badge">{{ t('hasFanBadge') }}</span>
+      <span :class="['participation-badge', room.fudaiCount > 0 ? 'participated' : 'not-participated']">
+        {{ room.fudaiCount > 0 ? t('grabbed') : t('notParticipated') }}
+      </span>
     </div>
     <div class="card-footer">
-      <span class="fudai-count">{{ room.fudaiCount > 0 ? t('grabbed') : '-' }}</span>
       <span class="countdown">{{ t('drawIn') }}: {{ formatRemaining(room.remainingSeconds) }}</span>
     </div>
   </div>
@@ -170,6 +172,25 @@ function formatRemaining(seconds: number | null): string {
   background: #fff0f3;
   padding: 1px 4px;
   border-radius: 3px;
+}
+
+.participation-badge {
+  font-size: 11px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  border: 1px solid transparent;
+}
+
+.participation-badge.participated {
+  color: #237804;
+  background: #f6ffed;
+  border-color: #b7eb8f;
+}
+
+.participation-badge.not-participated {
+  color: #8c8c8c;
+  background: #f5f5f5;
+  border-color: #d9d9d9;
 }
 
 .card-footer {
