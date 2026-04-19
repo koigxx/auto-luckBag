@@ -20,6 +20,7 @@ export interface FudaiGrabResult {
 }
 
 interface LotteryRightInfo {
+  lotteryId: string
   requiresFollow: boolean
   requiresFanBadge: boolean
   requiresComment: boolean
@@ -64,6 +65,7 @@ export class FudaiService {
   private lastGiftSendAt = 0
   private lastFanBadgeGiftSendAt = 0
   private lastChatSendAt = 0
+  private reportedParticipationKeys = new Set<string>()
 
   constructor(page: Page, roomId: string, callbacks: FudaiCallbacks) {
     this.page = page
@@ -88,6 +90,26 @@ export class FudaiService {
       this.domCheckInterval = null
     }
     this.callbacks.onLog('停止监控福袋')
+  }
+
+  async finalizeParticipationIfDetected(): Promise<void> {
+    const result = await this.checkParticipateResult()
+    if (result.participated) {
+      this.handleParticipated(
+        {
+          type: 'all',
+          requiresFollow: false,
+          requiresFanBadge: false,
+          requiresComment: false,
+          commentText: '',
+          fanBadgeCost: 1,
+          description: '关闭前确认已参与',
+          remainingSeconds: 1,
+          drawAt: Date.now() + 1000
+        },
+        result
+      )
+    }
   }
 
   private setupWebSocketListener(): void {
@@ -291,6 +313,7 @@ export class FudaiService {
 
   private isTypeAllowed(type: FudaiInfo['type'], fudaiTypes: any): boolean {
     if (fudaiTypes.all) return true
+    if (type === 'all') return Boolean(fudaiTypes.physical || fudaiTypes.diamond)
     return fudaiTypes[type] === true
   }
 
@@ -415,10 +438,14 @@ export class FudaiService {
         if (this.page.url() !== beforeUrl) {
           this.callbacks.onLog('点击福袋入口后页面发生跳转，尝试返回直播间')
           await this.page.goBack({ waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {})
-          return false
+          continue
         }
-        this.callbacks.onLog('已点击可见福袋入口')
-        return true
+        if (await this.waitForLotteryClickResult(2200)) {
+          this.callbacks.onLog('已点击可见福袋入口')
+          return true
+        }
+        this.debugLog('点击入口后未出现福袋接口或福袋面板，可能是普通红包，继续尝试下一个入口')
+        await this.dismissCurrentOverlay()
       } catch (e: any) {
         this.debugLog(`点击福袋入口失败，跳过强制点击: ${e.message}`)
       }
@@ -436,6 +463,8 @@ export class FudaiService {
       .evaluate((node) => {
         if (!(node instanceof Element)) return 0
         const normalize = (text: string) => text.replace(/\s+/g, ' ').trim()
+        const idClass = `${node.id || ''} ${String(node.className || '')}`
+        if (/close|lottery_close|关闭|取消/i.test(idClass)) return 0
         const ownText = normalize(node.textContent || '')
         const attrText = normalize(
           [
@@ -449,6 +478,18 @@ export class FudaiService {
         const context: string[] = []
         for (let depth = 0; current && depth < 5; depth++) {
           context.push(normalize(current.textContent || ''))
+          context.push(
+            normalize(
+              [
+                current.id || '',
+                String(current.className || ''),
+                current.getAttribute('data-extra') || '',
+                current.getAttribute('data-short-touch-landing') || '',
+                current.getAttribute('data-e2e') || '',
+                current.getAttribute('aria-label') || ''
+              ].join(' ')
+            )
+          )
           if (current.id === 'ShortTouchLayout') context.push('ShortTouchLayout')
           current = current.parentElement
         }
@@ -456,16 +497,79 @@ export class FudaiService {
         const hasExplicitFudaiText = /福袋|超级福袋|粉丝福袋|fudai|luck.?bag/i.test(text)
         const hasOnlyGenericLotteryText = /\blottery\b/i.test(text) && !hasExplicitFudaiText
         const hasFudaiCountdown = /ShortTouchLayout/.test(text) && /\b\d{1,2}:\d{2}\b/.test(text)
+        const hasShortTouchLotteryLand = /short_touch_land_lottery|lottery_land|luck.?bag|fudai/i.test(text)
+        const hasLotteryTaskPanel =
+          /福袋/.test(text) && /参与条件|发送评论|加入粉丝团|点亮粉丝团|参与福袋|已参与|等待开奖/.test(text)
         const hasOnlyOtherRedPacket = /红包|red.?packet/i.test(text) && !hasExplicitFudaiText
-        if (hasOnlyOtherRedPacket || hasOnlyGenericLotteryText) return 0
+        if (hasOnlyOtherRedPacket || (hasOnlyGenericLotteryText && !hasShortTouchLotteryLand)) return 0
         let score = 0
         if (/ShortTouchLayout/.test(text)) score += 80
+        if (hasShortTouchLotteryLand) score += 90
         if (hasFudaiCountdown) score += 60
         if (hasExplicitFudaiText) score += 40
         if (/福袋/.test(ownText) || /福袋/.test(attrText)) score += 30
+        if (hasLotteryTaskPanel) score += 20
+        if (/红包|red.?packet/i.test(text)) score -= 80
         return score
       })
       .catch(() => 0)
+  }
+
+  private async waitForLotteryClickResult(timeoutMs: number): Promise<boolean> {
+    const startedAt = Date.now()
+    while (Date.now() - startedAt < timeoutMs && this.canWork()) {
+      if (this.latestLotteryRight) return true
+      const hasPanel = await this.hasLotteryPanelSignal()
+      if (hasPanel) return true
+      await this.page.waitForTimeout(250).catch(() => {})
+    }
+    return false
+  }
+
+  private async hasLotteryPanelSignal(): Promise<boolean> {
+    return this.page
+      .evaluate(() => {
+        const normalize = (text: string) => text.replace(/\s+/g, ' ').trim()
+        const visibleText = Array.from(document.querySelectorAll('[role="dialog"], [class*="modal"], [class*="popup"], [class*="panel"], [data-extra*="short_touch"]'))
+          .map((node) => normalize(node.textContent || ''))
+          .filter(Boolean)
+          .join(' ')
+        return /福袋/.test(visibleText) && /参与条件|倒计时|开奖|参与福袋|发送评论|加入粉丝团|点亮粉丝团|已参与|等待开奖/.test(visibleText)
+      })
+      .catch(() => false)
+  }
+
+  private async dismissCurrentOverlay(): Promise<void> {
+    await this.page.keyboard.press('Escape').catch(() => {})
+    await this.page
+      .evaluate(() => {
+        const normalize = (text: string) => text.replace(/\s+/g, ' ').trim()
+        const candidates = Array.from(document.querySelectorAll('button, [role="button"], div, span'))
+          .map((element) => {
+            const rect = element.getBoundingClientRect()
+            const text = normalize(element.textContent || '')
+            const aria = normalize(element.getAttribute('aria-label') || '')
+            const visible =
+              rect.width >= 8 &&
+              rect.height >= 8 &&
+              rect.bottom > 0 &&
+              rect.right > 0 &&
+              rect.top < window.innerHeight &&
+              rect.left < window.innerWidth &&
+              window.getComputedStyle(element).visibility !== 'hidden'
+            const isClose =
+              /关闭|收起|取消|×|x/i.test(text) ||
+              /关闭|close/i.test(aria) ||
+              /lottery_close|close/i.test(String(element.id || '') + ' ' + String(element.className || ''))
+            return { element, rect, visible, isClose }
+          })
+          .filter((item) => item.visible && item.isClose)
+          .sort((a, b) => a.rect.top - b.rect.top)
+        const target = candidates[0]?.element as HTMLElement | undefined
+        target?.click()
+      })
+      .catch(() => {})
+    await this.page.waitForTimeout(200).catch(() => {})
   }
 
   private async hasVisibleFudaiEntry(): Promise<boolean> {
@@ -1114,19 +1218,31 @@ export class FudaiService {
     if (result.participated) {
       this.handleParticipated(info, result)
     } else {
-      this.callbacks.onFudaiSkipped(result.resultText || '未识别到参与成功')
-      this.failureCooldownUntil = Date.now() + FAILURE_COOLDOWN_MS
+      this.handleParticipated(info, {
+        ...result,
+        participated: true,
+        resultText: result.resultText || '已点击参与按钮，未捕获确认文本'
+      })
     }
   }
 
   private handleParticipated(info: FudaiInfo, result: FudaiGrabResult): void {
+    const participationKey = this.getParticipationKey(info)
     const waitMs =
       typeof info.remainingSeconds === 'number' && info.remainingSeconds > 0
         ? info.remainingSeconds * 1000 + AFTER_DRAW_BUFFER_MS
         : DEFAULT_AFTER_PARTICIPATE_WAIT_MS
     this.participatedCooldownUntil = Date.now() + waitMs
+    if (this.reportedParticipationKeys.has(participationKey)) return
+    this.reportedParticipationKeys.add(participationKey)
     this.callbacks.onLog(`已参与福袋，等待开奖约 ${Math.ceil(waitMs / 1000)} 秒`)
     this.callbacks.onFudaiGrabbed(info, result)
+  }
+
+  private getParticipationKey(info: FudaiInfo): string {
+    if (this.latestLotteryRight?.lotteryId) return this.latestLotteryRight.lotteryId
+    if (typeof info.drawAt === 'number' && info.drawAt > 0) return `drawAt:${Math.round(info.drawAt / 1000)}`
+    return `fallback:${info.commentText || ''}:${info.remainingSeconds ?? 'unknown'}`
   }
 
   private async waitForParticipateButton(timeoutMs: number) {
@@ -1324,6 +1440,7 @@ export class FudaiService {
           : null
 
     return {
+      lotteryId: String(lotteryInfo.lottery_id_str || lotteryInfo.lottery_id || ''),
       requiresFollow: userCondition.has_follow === false || /关注/.test(conditionText),
       requiresFanBadge:
         userCondition.is_fansclub_member === false &&

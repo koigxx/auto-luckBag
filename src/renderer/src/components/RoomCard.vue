@@ -57,7 +57,7 @@ function formatRemaining(seconds: number | null): string {
       <span v-if="room.hasFanBadge" class="fan-badge">{{ t('hasFanBadge') }}</span>
     </div>
     <div class="card-footer">
-      <span class="fudai-count">{{ t('grabbed') }}: {{ room.fudaiCount }}</span>
+      <span class="fudai-count">{{ room.fudaiCount > 0 ? t('grabbed') : '-' }}</span>
       <span class="countdown">{{ t('drawIn') }}: {{ formatRemaining(room.remainingSeconds) }}</span>
     </div>
   </div>

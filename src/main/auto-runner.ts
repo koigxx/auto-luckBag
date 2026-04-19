@@ -45,16 +45,15 @@ export interface AutoRunState {
 
 const DEFAULT_SOURCE_URL = ''
 const DEFAULT_SCAN_INTERVAL_SECONDS = 50
-const MIN_ENTER_BEFORE_SECONDS = 100
-const DEFAULT_ENTER_BEFORE_SECONDS = 100
+const MIN_ENTER_BEFORE_SECONDS = 90
+const DEFAULT_ENTER_BEFORE_SECONDS = 90
 const MAX_PENDING_VERIFY = 5
 const MAX_CANDIDATES = 5
 const DEFAULT_CANDIDATE_POOL_LIMIT = 5
 const RISK_PAUSE_MS = 10 * 60 * 1000
 const CANDIDATE_TTL_MS = 30 * 60 * 1000
 const REJECTED_CANDIDATE_TTL_MS = 30 * 60 * 1000
-const VERIFY_DIRECT_ENTER_EXTRA_SECONDS = 15
-const VERIFY_DIRECT_ENTER_LATE_TOLERANCE_SECONDS = 20
+const VERIFY_DIRECT_ENTER_MIN_RATIO = 0.8
 const AFTER_DRAW_RESUME_BUFFER_SECONDS = 5
 const RECHECK_CANDIDATE_TTL_MS = 8 * 60 * 1000
 const SCAN_OPERATION_TIMEOUT_MS = 75_000
@@ -272,8 +271,10 @@ export class AutoRunner {
 
       if (this.hasPendingEnterWindow()) {
         this.setStatus('waiting')
-        this.log('候选接近开奖，暂停新的扫描和验证')
-        this.scheduleNext(1)
+        this.log('候选即将到达提前进房时间，直接进入开奖直播间')
+        const entered = await this.enterDueRooms(true)
+        if (!this.state.running) return
+        this.scheduleNext(entered > 0 ? 10 : 1)
         return
       }
 
@@ -402,8 +403,8 @@ export class AutoRunner {
         return 0
       }
 
-      const directEnterThreshold = this.state.enterBeforeSeconds + VERIFY_DIRECT_ENTER_EXTRA_SECONDS
-      const directEnterLowerBound = Math.max(2, this.state.enterBeforeSeconds - VERIFY_DIRECT_ENTER_LATE_TOLERANCE_SECONDS)
+      const directEnterThreshold = this.state.enterBeforeSeconds
+      const directEnterLowerBound = Math.max(2, Math.floor(this.state.enterBeforeSeconds * VERIFY_DIRECT_ENTER_MIN_RATIO))
       if (
         remainingSeconds !== null &&
         remainingSeconds > directEnterLowerBound &&
@@ -416,11 +417,9 @@ export class AutoRunner {
         }
         const conflict = this.findDrawTimeConflict(result.room)
         if (conflict) {
-          await this.closeVerificationPage(result)
           this.log(
-            `临近开奖直播间与现有福袋开奖时间冲突，跳过直接停留：${result.room.name}，冲突=${conflict.name}，间隔=${conflict.diffSeconds}秒`
+            `临近开奖直播间与现有福袋开奖时间接近，但当前剩余超过提前进房时间 80%，优先接管当前直播间：${result.room.name}，冲突=${conflict.name}，间隔=${conflict.diffSeconds}秒`
           )
-          return 0
         }
         if (!this.roomManager.hasCapacity()) {
           await this.closeVerificationPage(result)
@@ -483,10 +482,11 @@ export class AutoRunner {
     return 0
   }
 
-  private async enterDueRooms(): Promise<number> {
+  private async enterDueRooms(includeGuardWindow = false): Promise<number> {
     const dueRooms = this.getCandidateSnapshot().filter((room) => {
       const remainingSeconds = this.currentRemainingSeconds(room)
-      return remainingSeconds !== null && remainingSeconds > 2 && remainingSeconds <= this.state.enterBeforeSeconds
+      const threshold = this.state.enterBeforeSeconds + (includeGuardWindow ? DUE_ENTER_GUARD_SECONDS : 0)
+      return remainingSeconds !== null && remainingSeconds > 2 && remainingSeconds <= threshold
     })
 
     if (dueRooms.length === 0) return 0

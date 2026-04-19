@@ -4,7 +4,6 @@ export interface FudaiTypes {
   all: boolean
   physical: boolean
   diamond: boolean
-  other: boolean
 }
 
 export interface RoomConfig {
@@ -44,8 +43,7 @@ const defaults: AppConfig = {
   fudaiTypes: {
     all: true,
     physical: false,
-    diamond: false,
-    other: false
+    diamond: false
   },
   diamondBudget: 10,
   diamondUsed: 0,
@@ -53,7 +51,7 @@ const defaults: AppConfig = {
   autoFollow: true,
   debugLogs: false,
   scanIntervalSeconds: 50,
-  enterBeforeSeconds: 100,
+  enterBeforeSeconds: 90,
   candidatePoolLimit: 5,
   rooms: [],
   preferredRooms: [],

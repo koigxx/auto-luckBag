@@ -16,7 +16,6 @@ export interface FudaiTypes {
   all: boolean
   physical: boolean
   diamond: boolean
-  other: boolean
 }
 
 export interface RunStats {

@@ -22,11 +22,10 @@ function toggleFudaiType(key: keyof FudaiTypes) {
     newTypes.all = newVal
     newTypes.physical = newVal
     newTypes.diamond = newVal
-    newTypes.other = newVal
   } else {
     newTypes[key] = !newTypes[key]
     // 如果所有子项都选中，则all也选中；否则all取消
-    newTypes.all = newTypes.physical && newTypes.diamond && newTypes.other
+    newTypes.all = newTypes.physical && newTypes.diamond
   }
 
   emit('update', { fudaiTypes: newTypes })
@@ -58,10 +57,6 @@ function updateBudget(value: string) {
           <label class="checkbox-label">
             <input type="checkbox" :checked="config.fudaiTypes.diamond" @change="toggleFudaiType('diamond')" />
             {{ t('diamond') }}
-          </label>
-          <label class="checkbox-label">
-            <input type="checkbox" :checked="config.fudaiTypes.other" @change="toggleFudaiType('other')" />
-            {{ t('other') }}
           </label>
         </div>
       </div>

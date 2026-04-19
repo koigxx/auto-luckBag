@@ -22,16 +22,16 @@ const emit = defineEmits<{
 }>()
 
 const sourceUrl = ref('')
-const scanIntervalSeconds = ref(50)
-const enterBeforeSeconds = ref(100)
-const candidatePoolLimit = ref(5)
+const scanIntervalSeconds = ref(40)
+const enterBeforeSeconds = ref(80)
+const candidatePoolLimit = ref(4)
 const stopAfterMinutes = ref<number | null>(null)
 
 function handleStart() {
   emit('start', {
     sourceUrl: sourceUrl.value.trim() || undefined,
     scanIntervalSeconds: scanIntervalSeconds.value,
-    enterBeforeSeconds: Math.max(100, enterBeforeSeconds.value || 100),
+    enterBeforeSeconds: Math.max(90, enterBeforeSeconds.value || 90),
     candidatePoolLimit: Math.min(5, Math.max(1, candidatePoolLimit.value || 5)),
     stopAfterMinutes: stopAfterMinutes.value || undefined
   })
@@ -85,7 +85,7 @@ function formatRemaining(seconds: number | null | undefined): string {
         <input
           v-model.number="enterBeforeSeconds"
           type="number"
-          min="100"
+          min="90"
           step="10"
           :disabled="state?.running"
         />

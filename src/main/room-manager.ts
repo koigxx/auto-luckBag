@@ -160,6 +160,7 @@ export class RoomManager {
     }
 
     if (room.fudaiService) {
+      await room.fudaiService.finalizeParticipationIfDetected().catch(() => {})
       room.fudaiService.stopMonitoring()
       room.fudaiService = null
     }

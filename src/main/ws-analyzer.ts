@@ -1,5 +1,5 @@
 export interface FudaiInfo {
-  type: 'all' | 'physical' | 'diamond' | 'other'
+  type: 'all' | 'physical' | 'diamond'
   requiresFollow: boolean
   requiresFanBadge: boolean
   requiresComment: boolean
@@ -19,8 +19,7 @@ const FUDAI_METHODS = [
 
 const TYPE_KEYWORDS: Array<[RegExp, FudaiInfo['type']]> = [
   [/实物|奖品|收货地址|包邮/, 'physical'],
-  [/钻石|抖币|diamond|coin/i, 'diamond'],
-  [/优惠券|券|coupon/i, 'other']
+  [/钻石|抖币|diamond|coin/i, 'diamond']
 ]
 
 export function analyzeWebSocketFrame(payload: string | Buffer): FudaiInfo | null {

@@ -165,6 +165,7 @@ export class DiscoveryService {
 
     this.log(`扫描完成，发现 ${sortedRooms.length} 个直播间候选`)
     logInfo('discover', `scan complete candidates=${sortedRooms.length}`)
+    await this.parkSourcePage()
     return sortedRooms
   }
 
@@ -349,6 +350,11 @@ export class DiscoveryService {
     const context = await this.browserManager.getContext()
     this.page = await context.newPage()
     return this.page
+  }
+
+  private async parkSourcePage(): Promise<void> {
+    if (!this.page || this.page.isClosed()) return
+    await this.page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {})
   }
 
   private async extractRoomsFromDom(page: Page): Promise<DiscoveredRoom[]> {
