@@ -45,8 +45,8 @@ export interface AutoRunState {
 
 const DEFAULT_SOURCE_URL = ''
 const DEFAULT_SCAN_INTERVAL_SECONDS = 50
-const MIN_ENTER_BEFORE_SECONDS = 120
-const DEFAULT_ENTER_BEFORE_SECONDS = 120
+const MIN_ENTER_BEFORE_SECONDS = 100
+const DEFAULT_ENTER_BEFORE_SECONDS = 100
 const MAX_PENDING_VERIFY = 5
 const MAX_CANDIDATES = 5
 const DEFAULT_CANDIDATE_POOL_LIMIT = 5
@@ -55,7 +55,7 @@ const CANDIDATE_TTL_MS = 30 * 60 * 1000
 const REJECTED_CANDIDATE_TTL_MS = 30 * 60 * 1000
 const VERIFY_DIRECT_ENTER_EXTRA_SECONDS = 15
 const VERIFY_DIRECT_ENTER_LATE_TOLERANCE_SECONDS = 20
-const AFTER_DRAW_RESUME_BUFFER_SECONDS = 20
+const AFTER_DRAW_RESUME_BUFFER_SECONDS = 5
 const RECHECK_CANDIDATE_TTL_MS = 8 * 60 * 1000
 const SCAN_OPERATION_TIMEOUT_MS = 75_000
 const VERIFY_OPERATION_TIMEOUT_MS = 150_000
@@ -432,15 +432,17 @@ export class AutoRunner {
           if (result.page && !result.page.isClosed()) {
             await this.roomManager.addRoomFromPage(result.page, result.room.url, result.room.name, {
               countdownText: result.room.countdownText,
-              remainingSeconds
+              remainingSeconds,
+              drawAt: result.room.drawAt
             })
           } else {
             await this.roomManager.addRoom(result.room.url, result.room.name, {
               countdownText: result.room.countdownText,
-              remainingSeconds
+              remainingSeconds,
+              drawAt: result.room.drawAt
             })
           }
-          const waitSeconds = Math.max(30, remainingSeconds + AFTER_DRAW_RESUME_BUFFER_SECONDS)
+          const waitSeconds = Math.max(10, remainingSeconds + AFTER_DRAW_RESUME_BUFFER_SECONDS)
           this.log(
             `验证时已临近开奖，直接在当前直播间参与：${result.room.name}，剩余=${remainingSeconds}秒，约 ${waitSeconds} 秒后继续搜索`
           )
@@ -505,7 +507,8 @@ export class AutoRunner {
       try {
         await this.roomManager.addRoom(room.url, room.name, {
           countdownText: room.countdownText,
-          remainingSeconds
+          remainingSeconds,
+          drawAt: room.drawAt
         })
         this.candidatePool.delete(room.url)
         entered++
@@ -667,8 +670,13 @@ export class AutoRunner {
 
     for (const existing of this.roomManager.getAllRooms()) {
       if (existing.url === room.url) continue
-      if (typeof existing.remainingSeconds !== 'number' || existing.remainingSeconds <= 0) continue
-      const existingDrawAt = Date.now() + Math.max(0, existing.remainingSeconds) * 1000
+      const existingDrawAt =
+        typeof existing.drawAt === 'number' && existing.drawAt > 0
+          ? existing.drawAt
+          : typeof existing.remainingSeconds === 'number' && existing.remainingSeconds > 0
+            ? Date.now() + Math.max(0, existing.remainingSeconds) * 1000
+            : null
+      if (existingDrawAt === null) continue
       const diffSeconds = Math.floor(Math.abs(roomDrawAt - existingDrawAt) / 1000)
       if (diffSeconds < this.state.enterBeforeSeconds) {
         return { name: existing.name, diffSeconds }

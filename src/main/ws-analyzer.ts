@@ -7,6 +7,7 @@ export interface FudaiInfo {
   fanBadgeCost: number
   description: string
   remainingSeconds?: number | null
+  drawAt?: number | null
   raw?: unknown
 }
 
@@ -49,6 +50,7 @@ function parseJsonMessage(json: any): FudaiInfo | null {
 
 function parseTextMessage(text: string): FudaiInfo | null {
   if (!hasFudaiSignal(text)) return null
+  const remainingSeconds = parseRemainingSeconds(text)
 
   return {
     type: detectType(text),
@@ -57,7 +59,8 @@ function parseTextMessage(text: string): FudaiInfo | null {
     requiresComment: /评论|口令|comment|keyword/i.test(text),
     commentText: extractCommentText(text),
     fanBadgeCost: extractFanBadgeCost(text),
-    remainingSeconds: parseRemainingSeconds(text),
+    remainingSeconds,
+    drawAt: remainingSeconds !== null ? Date.now() + remainingSeconds * 1000 : null,
     description: text.replace(/\s+/g, ' ').slice(0, 160)
   }
 }
@@ -70,6 +73,7 @@ function extractFudaiInfo(data: any, method: string): FudaiInfo {
   const conditions = data?.conditions || data?.requirements || data?.condition || {}
   const fanBadgeCost =
     Number(conditions.fan_badge_cost || conditions.diamond_cost || data?.fan_badge_cost) || 1
+  const remainingSeconds = parseRemainingSeconds(text)
 
   return {
     type: detectType(`${description} ${text}`),
@@ -84,7 +88,8 @@ function extractFudaiInfo(data: any, method: string): FudaiInfo {
       String(data?.comment_text || data?.keyword || conditions.comment_text || '') ||
       extractCommentText(text),
     fanBadgeCost,
-    remainingSeconds: parseRemainingSeconds(text),
+    remainingSeconds,
+    drawAt: remainingSeconds !== null ? Date.now() + remainingSeconds * 1000 : null,
     description,
     raw: data
   }

@@ -53,7 +53,7 @@ const defaults: AppConfig = {
   autoFollow: true,
   debugLogs: false,
   scanIntervalSeconds: 50,
-  enterBeforeSeconds: 120,
+  enterBeforeSeconds: 100,
   candidatePoolLimit: 5,
   rooms: [],
   preferredRooms: [],

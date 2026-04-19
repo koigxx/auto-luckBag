@@ -27,7 +27,8 @@ export function setupIpcHandlers(
         fudaiCount: room.fudaiCount,
         hasFanBadge: room.hasFanBadge,
         countdownText: room.countdownText,
-        remainingSeconds: room.remainingSeconds
+        remainingSeconds: room.remainingSeconds,
+        drawAt: room.drawAt
       })
     },
     (roomId, message) => {
@@ -113,7 +114,11 @@ export function setupIpcHandlers(
 
       const room = await roomManager.addRoom(fastestRoom.url, fastestRoom.name, {
         countdownText: fastestRoom.countdownText,
-        remainingSeconds: fastestRoom.remainingSeconds
+        remainingSeconds: fastestRoom.remainingSeconds,
+        drawAt:
+          'drawAt' in fastestRoom && typeof fastestRoom.drawAt === 'number'
+            ? fastestRoom.drawAt
+            : null
       })
       return {
         success: true,

@@ -26,6 +26,7 @@ interface LotteryRightInfo {
   commentText: string
   fanBadgeCost: number
   remainingSeconds: number | null
+  drawAt: number | null
 }
 
 const SELECTORS = {
@@ -47,7 +48,7 @@ const SELECTORS = {
 const HANDLE_THROTTLE_MS = 15_000
 const FAILURE_COOLDOWN_MS = 20_000
 const DEFAULT_AFTER_PARTICIPATE_WAIT_MS = 90_000
-const AFTER_DRAW_BUFFER_MS = 20_000
+const AFTER_DRAW_BUFFER_MS = 5_000
 
 export class FudaiService {
   private page: Page
@@ -132,7 +133,8 @@ export class FudaiService {
           requiresComment: info.requiresComment,
           commentText: info.commentText,
           fanBadgeCost: info.fanBadgeCost,
-          remainingSeconds: info.remainingSeconds
+          remainingSeconds: info.remainingSeconds,
+          drawAt: info.drawAt
         })
         this.callbacks.onLog(
           `已获取福袋任务信息：关注=${info.requiresFollow ? '是' : '否'}，粉丝团=${info.requiresFanBadge ? '是' : '否'}，评论=${info.requiresComment ? '是' : '否'}，剩余=${info.remainingSeconds ?? '未知'}秒`
@@ -282,7 +284,8 @@ export class FudaiService {
       commentText: '',
       fanBadgeCost: 1,
       description,
-      remainingSeconds
+      remainingSeconds,
+      drawAt: remainingSeconds !== null ? Date.now() + remainingSeconds * 1000 : null
     }
   }
 
@@ -313,7 +316,11 @@ export class FudaiService {
       requiresComment: info.requiresComment || Boolean(rightInfo?.requiresComment) || /口令|评论|发送指定/.test(pageInfo.text),
       commentText: info.commentText || rightInfo?.commentText || pageInfo.comment,
       fanBadgeCost: Math.max(1, info.fanBadgeCost || rightInfo?.fanBadgeCost || pageInfo.cost || 1),
-      remainingSeconds: info.remainingSeconds ?? rightInfo?.remainingSeconds ?? domInfo.remainingSeconds
+      remainingSeconds: info.remainingSeconds ?? rightInfo?.remainingSeconds ?? domInfo.remainingSeconds,
+      drawAt:
+        info.drawAt ??
+        rightInfo?.drawAt ??
+        (domInfo.remainingSeconds !== null ? Date.now() + domInfo.remainingSeconds * 1000 : null)
     }
   }
 
@@ -390,9 +397,17 @@ export class FudaiService {
 
   private async clickVisibleFudaiIcon(): Promise<boolean> {
     const handles = await this.page.locator(SELECTORS.fudaiIcon).elementHandles().catch(() => [])
+    const candidates: Array<{ handle: ElementHandle<Node>; score: number }> = []
     for (const handle of handles) {
       if (!(await this.isElementVisible(handle))) continue
-      if (!(await this.isLikelyFudaiEntry(handle))) continue
+      const score = await this.scoreFudaiEntry(handle)
+      if (score <= 0) continue
+      candidates.push({ handle, score })
+    }
+
+    candidates.sort((a, b) => b.score - a.score)
+
+    for (const { handle } of candidates) {
       const beforeUrl = this.page.url()
       try {
         await handle.click({ timeout: 3000 })
@@ -413,9 +428,13 @@ export class FudaiService {
   }
 
   private async isLikelyFudaiEntry(handle: ElementHandle<Node>): Promise<boolean> {
+    return (await this.scoreFudaiEntry(handle)) > 0
+  }
+
+  private async scoreFudaiEntry(handle: ElementHandle<Node>): Promise<number> {
     return handle
       .evaluate((node) => {
-        if (!(node instanceof Element)) return false
+        if (!(node instanceof Element)) return 0
         const normalize = (text: string) => text.replace(/\s+/g, ' ').trim()
         const ownText = normalize(node.textContent || '')
         const attrText = normalize(
@@ -434,12 +453,19 @@ export class FudaiService {
           current = current.parentElement
         }
         const text = [ownText, attrText, ...context].join(' ')
-        const hasFudaiText = /福袋|超级福袋|粉丝福袋|fudai|luck.?bag|lottery/i.test(text)
+        const hasExplicitFudaiText = /福袋|超级福袋|粉丝福袋|fudai|luck.?bag/i.test(text)
+        const hasOnlyGenericLotteryText = /\blottery\b/i.test(text) && !hasExplicitFudaiText
         const hasFudaiCountdown = /ShortTouchLayout/.test(text) && /\b\d{1,2}:\d{2}\b/.test(text)
-        const hasOnlyOtherRedPacket = /红包|red.?packet/i.test(text) && !hasFudaiText
-        return (hasFudaiText || hasFudaiCountdown) && !hasOnlyOtherRedPacket
+        const hasOnlyOtherRedPacket = /红包|red.?packet/i.test(text) && !hasExplicitFudaiText
+        if (hasOnlyOtherRedPacket || hasOnlyGenericLotteryText) return 0
+        let score = 0
+        if (/ShortTouchLayout/.test(text)) score += 80
+        if (hasFudaiCountdown) score += 60
+        if (hasExplicitFudaiText) score += 40
+        if (/福袋/.test(ownText) || /福袋/.test(attrText)) score += 30
+        return score
       })
-      .catch(() => false)
+      .catch(() => 0)
   }
 
   private async hasVisibleFudaiEntry(): Promise<boolean> {
@@ -801,24 +827,35 @@ export class FudaiService {
             const shortPaidAction =
               text.length <= 40 &&
               /(?:加入粉丝团|点亮粉丝团|点亮灯牌|粉丝团点亮)\s*[（(]\s*\d+\s*钻(?:石)?\s*[）)]/.test(text)
-            const shortGenericAction = /^(?:加入粉丝团|点亮粉丝团|点亮灯牌|粉丝团点亮)$/.test(text)
+            const shortGenericAction =
+              text.length <= 40 &&
+              /^(?:去)?(?:加入粉丝团|点亮粉丝团|点亮灯牌|粉丝团点亮|开通粉丝团)(?:并参与|参与)?$/.test(text)
             const isAction = precisePaidAction || shortPaidAction || shortGenericAction
             const isStatusOnly = /未达成|参与条件|发送评论|倒计时/.test(text) && !/[（(]\s*\d+\s*钻(?:石)?\s*[）)]/.test(text)
             const isHeaderCard = rect.top < 170 && /酷炫勋章|专属礼物|进场特效|加会员/.test(ctx)
             const isLargeContainer = text.length > 60 || rect.width > 360 || rect.height > 80
+            const isMiddleDialogAction = rect.left >= 120 && rect.top >= 180 && rect.top <= window.innerHeight - 80
             const score =
               (precisePaidAction ? 120 : 0) +
               (shortPaidAction ? 90 : 0) +
-              (shortGenericAction ? 25 : 0) +
+              (shortGenericAction ? 55 : 0) +
               (inLotteryTask ? 20 : 0) +
+              (isMiddleDialogAction ? 12 : 0) +
               (rect.height >= 28 ? 8 : 0) -
               (isStatusOnly ? 80 : 0) -
               (isHeaderCard ? 80 : 0) -
               (isLargeContainer ? 120 : 0)
-            return { element, rect, text, area: rect.width * rect.height, score, isAction, inLotteryTask, isStatusOnly, isHeaderCard, isLargeContainer }
+            return { element, rect, text, area: rect.width * rect.height, score, isAction, inLotteryTask, isStatusOnly, isHeaderCard, isLargeContainer, isMiddleDialogAction }
           })
-          .filter(({ element, text, score, isAction, inLotteryTask, isStatusOnly, isHeaderCard, isLargeContainer }) =>
-            text && score > 0 && isAction && inLotteryTask && !isStatusOnly && !isHeaderCard && !isLargeContainer && isVisible(element)
+          .filter(({ element, text, score, isAction, inLotteryTask, isStatusOnly, isHeaderCard, isLargeContainer, isMiddleDialogAction }) =>
+            text &&
+            score > 0 &&
+            isAction &&
+            (inLotteryTask || isMiddleDialogAction) &&
+            !isStatusOnly &&
+            !isHeaderCard &&
+            !isLargeContainer &&
+            isVisible(element)
           )
           .sort((a, b) => b.score - a.score || a.area - b.area)
 
@@ -861,6 +898,10 @@ export class FudaiService {
 
     const clickedEntry = await this.clickFanBadgeEntry()
     if (!clickedEntry) {
+      if (await this.hasParticipateButton()) {
+        this.debugLog('未找到粉丝团按钮，但已出现参与福袋按钮，继续参与流程')
+        return true
+      }
       this.callbacks.onFudaiSkipped('未找到可点击的加入粉丝团/点亮灯牌入口，已避免点击普通礼物')
       this.failureCooldownUntil = Date.now() + FAILURE_COOLDOWN_MS
       return false
@@ -876,6 +917,10 @@ export class FudaiService {
 
     const confirmed = await this.clickFanBadgeConfirm()
     if (!confirmed) {
+      if (await this.hasParticipateButton()) {
+        this.debugLog('未找到粉丝团确认按钮，但已出现参与福袋按钮，继续参与流程')
+        return true
+      }
       this.callbacks.onFudaiSkipped('未找到明确的粉丝团/灯牌确认按钮，已避免误送普通礼物')
       this.failureCooldownUntil = Date.now() + FAILURE_COOLDOWN_MS
       return false
@@ -883,6 +928,12 @@ export class FudaiService {
 
     const verified = await this.waitForFanBadgeSatisfied(7000)
     if (!verified) {
+      if (await this.hasParticipateButton()) {
+        this.debugLog('粉丝团任务未明确确认，但已出现参与福袋按钮，继续参与流程')
+        store.set('diamondUsed', config.diamondUsed + cost)
+        this.callbacks.onFanBadgeAdded(cost)
+        return true
+      }
       this.callbacks.onFudaiSkipped('加入粉丝团/点亮灯牌后未确认任务完成，停止本次参与')
       this.failureCooldownUntil = Date.now() + FAILURE_COOLDOWN_MS
       return false
@@ -899,7 +950,7 @@ export class FudaiService {
 
     const oneClickStartedAt = Date.now()
     const oneClick = await this.clickVisibleTextAction({
-      keywords: ['一键发评论', '发评论参与', '评论参与', '发送评论参与', '一键评论'],
+      keywords: ['去发表评论', '一键发评论', '发评论参与', '评论参与', '发送评论参与', '一键评论', '发评论参与福袋', '一键发评论参与福袋'],
       excludeKeywords: ['参与条件', '未达成'],
       exact: false,
       requireLotteryContext: true,
@@ -1023,8 +1074,19 @@ export class FudaiService {
   }
 
   private async clickParticipate(info: FudaiInfo): Promise<void> {
+    const existingResult = await this.checkParticipateResult()
+    if (existingResult.participated) {
+      this.handleParticipated(info, existingResult)
+      return
+    }
+
     const participateButton = await this.waitForParticipateButton(9000)
     if (!participateButton) {
+      const result = await this.checkParticipateResult()
+      if (result.participated) {
+        this.handleParticipated(info, result)
+        return
+      }
       const text = await this.page.evaluate(() => document.body.innerText.replace(/\s+/g, ' ').slice(0, 240)).catch(() => '')
       this.callbacks.onFudaiSkipped(`未找到参与按钮，页面文本: ${text}`)
       this.failureCooldownUntil = Date.now() + FAILURE_COOLDOWN_MS
@@ -1048,43 +1110,123 @@ export class FudaiService {
     }
 
     this.callbacks.onLog('已点击参与按钮')
-    await this.randomDelay(1200, 1800)
-
-    const result = await this.checkParticipateResult()
+    const result = await this.waitForParticipateResult(9000)
     if (result.participated) {
-      const waitMs =
-        typeof info.remainingSeconds === 'number' && info.remainingSeconds > 0
-          ? info.remainingSeconds * 1000 + AFTER_DRAW_BUFFER_MS
-          : DEFAULT_AFTER_PARTICIPATE_WAIT_MS
-      this.participatedCooldownUntil = Date.now() + waitMs
-      this.callbacks.onLog(`已参与福袋，等待开奖约 ${Math.ceil(waitMs / 1000)} 秒`)
-      this.callbacks.onFudaiGrabbed(info, result)
+      this.handleParticipated(info, result)
     } else {
       this.callbacks.onFudaiSkipped(result.resultText || '未识别到参与成功')
       this.failureCooldownUntil = Date.now() + FAILURE_COOLDOWN_MS
     }
   }
 
+  private handleParticipated(info: FudaiInfo, result: FudaiGrabResult): void {
+    const waitMs =
+      typeof info.remainingSeconds === 'number' && info.remainingSeconds > 0
+        ? info.remainingSeconds * 1000 + AFTER_DRAW_BUFFER_MS
+        : DEFAULT_AFTER_PARTICIPATE_WAIT_MS
+    this.participatedCooldownUntil = Date.now() + waitMs
+    this.callbacks.onLog(`已参与福袋，等待开奖约 ${Math.ceil(waitMs / 1000)} 秒`)
+    this.callbacks.onFudaiGrabbed(info, result)
+  }
+
   private async waitForParticipateButton(timeoutMs: number) {
     const startedAt = Date.now()
     while (Date.now() - startedAt < timeoutMs && this.canWork()) {
-      const button = this.page
-        .locator('button, [role="button"], div')
-        .filter({ hasText: /立即参与|参与抽奖|参与|报名|抢福袋|等待开奖|已参与/ })
-        .first()
-      if ((await button.count().catch(() => 0)) > 0 && (await button.isVisible().catch(() => false))) {
-        return button
-      }
+      const target = await this.findParticipateButtonTarget()
+      if (target) return target
       await this.page.waitForTimeout(400)
     }
     return null
   }
 
+  private async hasParticipateButton(): Promise<boolean> {
+    return Boolean(await this.findParticipateButtonTarget())
+  }
+
+  private async findParticipateButtonTarget(): Promise<{ click: (options?: { timeout?: number }) => Promise<void> } | null> {
+    const target = await this.page
+      .evaluate(() => {
+        const normalize = (text: string) => text.replace(/\s+/g, ' ').trim()
+        const isVisible = (element: Element) => {
+          const style = window.getComputedStyle(element)
+          const rect = element.getBoundingClientRect()
+          return (
+            style.display !== 'none' &&
+            style.visibility !== 'hidden' &&
+            Number(style.opacity || 1) > 0.05 &&
+            rect.width >= 40 &&
+            rect.height >= 20 &&
+            rect.bottom > 0 &&
+            rect.right > 0 &&
+            rect.top < window.innerHeight &&
+            rect.left < window.innerWidth
+          )
+        }
+        const hasLotteryContext = (element: Element) => {
+          let current: Element | null = element
+          for (let depth = 0; current && depth < 8; depth++) {
+            const text = normalize(current.textContent || '')
+            if (/福袋|参与条件|倒计时|开奖|中奖|钻/.test(text)) return true
+            current = current.parentElement
+          }
+          return false
+        }
+
+        const candidates = Array.from(document.querySelectorAll('button, [role="button"], div, span, p'))
+          .map((element) => {
+            const rect = element.getBoundingClientRect()
+            const text = normalize(element.textContent || '')
+            const exactAction = /^(参与福袋|立即参与|参与抽奖|抢福袋|报名)$/.test(text)
+            const shortAction = text.length <= 20 && /参与福袋|立即参与|参与抽奖|抢福袋|报名/.test(text)
+            const isAction = exactAction || shortAction
+            const statusOnly = /已参与|等待开奖|参与成功|已成功参与/.test(text)
+            const largeContainer = text.length > 60 || rect.width > 380 || rect.height > 90
+            const score =
+              (exactAction ? 100 : 0) +
+              (shortAction ? 60 : 0) +
+              (hasLotteryContext(element) ? 15 : 0) +
+              (rect.height >= 32 ? 5 : 0) -
+              (statusOnly ? 150 : 0) -
+              (largeContainer ? 120 : 0)
+            return { rect, text, area: rect.width * rect.height, score, element, isAction }
+          })
+          .filter(({ element, text, score, isAction }) => text && isAction && score > 0 && isVisible(element))
+          .sort((a, b) => b.score - a.score || a.area - b.area)
+
+        ;(window as any).__luckBagDebugCandidates = candidates.slice(0, 8).map(({ rect, text, area, score }) => ({
+          text: text.slice(0, 80),
+          x: Math.round(rect.left),
+          y: Math.round(rect.top),
+          w: Math.round(rect.width),
+          h: Math.round(rect.height),
+          area: Math.round(area),
+          score
+        }))
+
+        const best = candidates[0]
+        if (!best) return null
+        return {
+          x: best.rect.left + best.rect.width / 2,
+          y: best.rect.top + best.rect.height / 2,
+          text: best.text
+        }
+      })
+      .catch(() => null)
+
+    await this.logDebugCandidates('参与按钮')
+    if (!target) return null
+    return {
+      click: async () => {
+        await this.page.mouse.click(target.x, target.y)
+      }
+    }
+  }
+
   private async checkParticipateResult(): Promise<FudaiGrabResult> {
     const resultText = await this.page.evaluate(() => document.body.innerText.slice(0, 6000)).catch(() => '')
     const compactText = resultText.replace(/\s+/g, ' ')
-    const participated = /参与成功|已参与|报名成功|等待开奖|成功参与/.test(compactText)
-    const won = /中奖|恭喜|获得|已中|抽中/.test(compactText)
+    const participated = /参与成功|已参与|报名成功|等待开奖|成功参与|已成功参与/.test(compactText)
+    const won = /恭喜.{0,30}(?:中奖|获得|抽中)|你已中奖|您已中奖|中奖成功|获得奖品/.test(compactText)
     const hasCoupon = /优惠券|券|coupon/i.test(compactText)
     const hasDiamond = /钻石|抖币|diamond/i.test(compactText)
     const hasPhysical = /实物|填写地址|收货地址|奖品|包邮/.test(compactText)
@@ -1097,8 +1239,8 @@ export class FudaiService {
     const diamondAmount =
       prizeType === 'diamond'
         ? Number(
-            compactText.match(/(?:获得|中奖|抽中|中了|恭喜)[^0-9]{0,30}(\d{1,6})\s*(?:钻石|钻|抖币)/)?.[1] ||
-              compactText.match(/(\d{1,6})\s*(?:钻石|钻|抖币)/)?.[1] ||
+            compactText.match(/(?:恭喜|中奖|抽中|获得|中了)[^。！!，,]{0,80}?(\d{1,5})\s*(?:钻石|钻|抖币)/)?.[1] ||
+              compactText.match(/(?:获得|奖品[：:]?)\s*(\d{1,5})\s*(?:钻石|钻|抖币)/)?.[1] ||
               0
           )
         : 0
@@ -1110,6 +1252,25 @@ export class FudaiService {
       diamondAmount,
       resultText: compactText.slice(0, 180)
     }
+  }
+
+  private async waitForParticipateResult(timeoutMs: number): Promise<FudaiGrabResult> {
+    const startedAt = Date.now()
+    let lastResult: FudaiGrabResult = {
+      participated: false,
+      won: false,
+      prizeType: null,
+      diamondAmount: 0,
+      resultText: ''
+    }
+
+    while (Date.now() - startedAt < timeoutMs && this.canWork()) {
+      lastResult = await this.checkParticipateResult()
+      if (lastResult.participated) return lastResult
+      await this.page.waitForTimeout(500).catch(() => {})
+    }
+
+    return lastResult
   }
 
   private parseLotteryRightInfo(text: string): LotteryRightInfo | null {
@@ -1147,9 +1308,20 @@ export class FudaiService {
     const commandText = this.extractCommandText(commentCondition) || commentText || ''
     const currentTime = this.normalizeTimestamp(lotteryInfo.current_time ?? payload?.extra?.now)
     const drawTime = this.normalizeTimestamp(lotteryInfo.draw_time)
+    const baseTime = currentTime ?? Date.now()
+    const clientServerOffset = Date.now() - baseTime
     const remainingFromDraw =
-      drawTime && currentTime && drawTime > currentTime ? Math.floor((drawTime - currentTime) / 1000) : null
+      drawTime && drawTime > baseTime ? Math.floor((drawTime - baseTime) / 1000) : null
     const countDown = Number(lotteryInfo.count_down)
+    const remainingFromCountDown = Number.isFinite(countDown) && countDown > 0 ? Math.floor(countDown) : null
+    const remainingSeconds =
+      remainingFromDraw !== null && remainingFromDraw > 0 ? remainingFromDraw : remainingFromCountDown
+    const drawAt =
+      drawTime && drawTime > baseTime
+        ? drawTime + clientServerOffset
+        : remainingFromCountDown !== null
+          ? Date.now() + remainingFromCountDown * 1000
+          : null
 
     return {
       requiresFollow: userCondition.has_follow === false || /关注/.test(conditionText),
@@ -1159,12 +1331,8 @@ export class FudaiService {
       requiresComment: userCondition.has_command === false || /口令|评论|发送/.test(conditionText),
       commentText: commandText,
       fanBadgeCost: Math.max(1, Number(conditionText.match(/(\d{1,3})\s*(?:钻石|抖币)/)?.[1] || 1)),
-      remainingSeconds:
-        remainingFromDraw !== null && remainingFromDraw > 0
-          ? remainingFromDraw
-          : Number.isFinite(countDown) && countDown > 0
-            ? countDown
-            : null
+      remainingSeconds,
+      drawAt
     }
   }
 

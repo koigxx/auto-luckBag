@@ -9,6 +9,7 @@ export interface RoomInfo {
   hasFanBadge: boolean
   countdownText: string
   remainingSeconds: number | null
+  drawAt: number | null
 }
 
 export interface FudaiTypes {

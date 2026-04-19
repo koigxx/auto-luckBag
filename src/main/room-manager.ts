@@ -16,12 +16,14 @@ export interface Room {
   hasFanBadge: boolean
   countdownText: string
   remainingSeconds: number | null
+  drawAt: number | null
   fudaiService: FudaiService | null
 }
 
 export interface RoomMetadata {
   countdownText?: string
   remainingSeconds?: number | null
+  drawAt?: number | null
 }
 
 export class RoomManager {
@@ -70,7 +72,11 @@ export class RoomManager {
       fudaiCount: 0,
       hasFanBadge: false,
       countdownText: metadata.countdownText || '',
-      remainingSeconds: metadata.remainingSeconds ?? null,
+      remainingSeconds:
+        typeof metadata.drawAt === 'number' && metadata.drawAt > 0
+          ? Math.max(0, Math.ceil((metadata.drawAt - Date.now()) / 1000))
+          : metadata.remainingSeconds ?? null,
+      drawAt: metadata.drawAt ?? null,
       fudaiService: null
     }
 
@@ -108,7 +114,11 @@ export class RoomManager {
       fudaiCount: 0,
       hasFanBadge: false,
       countdownText: metadata.countdownText || '',
-      remainingSeconds: metadata.remainingSeconds ?? null,
+      remainingSeconds:
+        typeof metadata.drawAt === 'number' && metadata.drawAt > 0
+          ? Math.max(0, Math.ceil((metadata.drawAt - Date.now()) / 1000))
+          : metadata.remainingSeconds ?? null,
+      drawAt: metadata.drawAt ?? null,
       fudaiService: null
     }
 
@@ -225,17 +235,17 @@ export class RoomManager {
     const fudaiService = new FudaiService(room.page, room.id, {
       onFudaiDetected: (info) => {
         this.log(room.id, `检测到福袋: ${info.type}`)
-        this.updateRoomFudaiTiming(room, info.remainingSeconds)
+        this.updateRoomFudaiTiming(room, info.remainingSeconds, info.drawAt)
         room.status = 'grabbing'
         this.notifyUpdate(room)
       },
       onFudaiInfoUpdated: (info) => {
-        this.updateRoomFudaiTiming(room, info.remainingSeconds)
+        this.updateRoomFudaiTiming(room, info.remainingSeconds, info.drawAt)
       },
       onFudaiGrabbed: (info, result) => {
         room.fudaiCount++
         this.log(room.id, `参与福袋成功: ${info.type}`)
-        this.updateRoomFudaiTiming(room, info.remainingSeconds)
+        this.updateRoomFudaiTiming(room, info.remainingSeconds, info.drawAt)
         if (result.won && (result.prizeType === 'physical' || result.prizeType === 'diamond')) {
           this.log(room.id, `识别到中奖: ${result.prizeType}`)
         } else if (result.prizeType === 'coupon') {
@@ -263,10 +273,23 @@ export class RoomManager {
     await fudaiService.startMonitoring()
   }
 
-  private updateRoomFudaiTiming(room: Room, remainingSeconds: number | null | undefined): void {
-    if (typeof remainingSeconds !== 'number' || remainingSeconds <= 0) return
-    room.remainingSeconds = Math.floor(remainingSeconds)
-    this.scheduleAutoCloseAfterDraw(room.id, room.name, Math.max(30, room.remainingSeconds + 20))
+  private updateRoomFudaiTiming(room: Room, remainingSeconds: number | null | undefined, drawAt?: number | null): void {
+    const nextDrawAt = typeof drawAt === 'number' && drawAt > 0 ? drawAt : null
+    const nextRemaining =
+      nextDrawAt !== null
+        ? Math.max(0, Math.ceil((nextDrawAt - Date.now()) / 1000))
+        : typeof remainingSeconds === 'number'
+          ? Math.floor(remainingSeconds)
+          : null
+    if (nextRemaining === null || nextRemaining <= 0) return
+    if (typeof room.remainingSeconds === 'number' && room.remainingSeconds > 0 && nextRemaining > room.remainingSeconds + 60) {
+      this.log(room.id, `忽略疑似下一轮福袋倒计时：当前=${room.remainingSeconds}秒，新检测=${nextRemaining}秒`)
+      return
+    }
+    room.remainingSeconds = nextRemaining
+    if (nextDrawAt !== null) room.drawAt = nextDrawAt
+    else if (typeof remainingSeconds === 'number') room.drawAt = Date.now() + nextRemaining * 1000
+    this.scheduleAutoCloseAfterDraw(room.id, room.name, Math.max(10, room.remainingSeconds + 5))
     this.notifyUpdate(room)
   }
 
@@ -307,7 +330,8 @@ export class RoomManager {
       fudaiCount: room.fudaiCount,
       hasFanBadge: room.hasFanBadge,
       countdownText: room.countdownText,
-      remainingSeconds: room.remainingSeconds
+      remainingSeconds: room.remainingSeconds,
+      drawAt: room.drawAt
     }
   }
 

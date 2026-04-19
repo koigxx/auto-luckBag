@@ -26,6 +26,7 @@ export function useIpc() {
   let unsubRoomRemoved: (() => void) | null = null
   let unsubRunStats: (() => void) | null = null
   let unsubAutoRun: (() => void) | null = null
+  let roomCountdownTimer: number | null = null
 
   onMounted(async () => {
     const authStatus = await window.api.auth.status()
@@ -64,6 +65,17 @@ export function useIpc() {
       autoRunState.value = entry
     })
 
+    roomCountdownTimer = window.setInterval(() => {
+      rooms.value = rooms.value.map((room) => ({
+        ...room,
+        remainingSeconds:
+          typeof room.drawAt === 'number' && room.drawAt > 0
+            ? Math.max(0, Math.ceil((room.drawAt - Date.now()) / 1000))
+            : typeof room.remainingSeconds === 'number' && room.remainingSeconds > 0
+              ? room.remainingSeconds - 1
+              : room.remainingSeconds
+      }))
+    }, 1000)
   })
 
   onUnmounted(() => {
@@ -72,6 +84,10 @@ export function useIpc() {
     unsubLogAdd?.()
     unsubRunStats?.()
     unsubAutoRun?.()
+    if (roomCountdownTimer !== null) {
+      window.clearInterval(roomCountdownTimer)
+      roomCountdownTimer = null
+    }
   })
 
   async function login() {
@@ -171,7 +187,7 @@ export function useIpc() {
       nextScanAt: now,
       candidateCount: autoRunState.value?.candidateCount || 0,
       pendingVerifyCount: autoRunState.value?.pendingVerifyCount || 0,
-      enterBeforeSeconds: options.enterBeforeSeconds || 120,
+      enterBeforeSeconds: options.enterBeforeSeconds || 100,
       candidatePoolLimit: Math.min(5, Math.max(1, options.candidatePoolLimit || 5)),
       candidates: autoRunState.value?.candidates || [],
       riskPausedUntil: autoRunState.value?.riskPausedUntil || null,

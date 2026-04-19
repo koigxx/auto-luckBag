@@ -227,6 +227,11 @@ export class DiscoveryService {
 
       await page.waitForSelector('body', { timeout: 10000 }).catch(() => {})
       await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {})
+      const endedBeforeSample = await this.getEndedLiveReason(page)
+      if (endedBeforeSample) {
+        this.log(`候选直播已结束，跳过验证: ${room.name || room.url}，原因=${endedBeforeSample}`)
+        return { room: null, riskDetected: false, riskReason: 'live-ended' }
+      }
       await this.simulateLightRead(page)
       const domResult = await this.sampleFudaiSignals(
         page,
@@ -240,6 +245,11 @@ export class DiscoveryService {
       if (challenge) {
         this.log(`验证直播间时检测到风控页面: ${challenge}`)
         return { room: null, riskDetected: true, riskReason: challenge }
+      }
+      const endedAfterSample = await this.getEndedLiveReason(page)
+      if (endedAfterSample) {
+        this.log(`候选直播已结束，跳过验证: ${room.name || room.url}，原因=${endedAfterSample}`)
+        return { room: null, riskDetected: false, riskReason: 'live-ended' }
       }
 
       const countdown = this.pickBestCountdown({
@@ -768,6 +778,18 @@ export class DiscoveryService {
       if (/95152\.douyin\.com/.test(url)) return '95152 风控页面'
       const text = await page.evaluate(() => document.body.innerText.slice(0, 3000))
       const match = text.match(/安全验证|滑块|拖动.*验证|环境异常|访问过于频繁|稍后再试|请完成验证|captcha/i)
+      return match?.[0] || ''
+    } catch {
+      return ''
+    }
+  }
+
+  private async getEndedLiveReason(page: Page): Promise<string> {
+    try {
+      const url = page.url()
+      if (/\/(error|404|notfound)(?:\/|\?|$)/i.test(url)) return '页面不存在'
+      const text = await page.evaluate(() => (document.body.innerText || '').replace(/\s+/g, ' ').slice(0, 3000))
+      const match = text.match(/直播已结束|主播已下播|直播结束|当前直播已结束|本场直播已结束|主播暂未开播|暂未开播|直播间不存在|房间不存在|内容不存在|页面不存在|该直播已关闭/)
       return match?.[0] || ''
     } catch {
       return ''
