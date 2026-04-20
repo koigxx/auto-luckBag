@@ -6,9 +6,9 @@ export class BrowserManager {
   private browser: Browser | null = null
   private context: BrowserContext | null = null
   private storageStatePath: string | null = null
-  private sourceNavQueue = new MinIntervalQueue(15000, 25000)
-  private liveRoomVerifyNavQueue = new MinIntervalQueue(40000, 55000)
-  private liveRoomEnterNavQueue = new MinIntervalQueue(4000, 9000)
+  private sourceNavQueue = new MinIntervalQueue(18000, 30000)
+  private liveRoomVerifyNavQueue = new MinIntervalQueue(45000, 65000)
+  private liveRoomEnterNavQueue = new MinIntervalQueue(6000, 12000)
 
   setStorageStatePath(path: string): void {
     this.storageStatePath = path

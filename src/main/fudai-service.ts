@@ -298,23 +298,73 @@ export class FudaiService {
       if (enrichedInfo.requiresFollow && !enrichedInfo.requiresFanBadge) await this.handleFollowRequirement()
       if (!this.canWork()) return
 
-      if (enrichedInfo.requiresComment) {
-        const commentResult = await this.handleCommentRequirement(enrichedInfo.commentText)
-        if (!commentResult) return
-      }
-      if (!this.canWork()) return
-
-      if (enrichedInfo.requiresFanBadge) {
-        await this.refreshLotteryPanelAfterTask()
-        const badgeResult = await this.handleFanBadgeRequirement(enrichedInfo.fanBadgeCost)
-        if (!badgeResult) return
-      }
-      if (!this.canWork()) return
-
-      await this.clickParticipate(enrichedInfo)
+      await this.executeFudaiTaskLoop(enrichedInfo)
     } finally {
       this.handling = false
     }
+  }
+
+  private async executeFudaiTaskLoop(initialInfo: FudaiInfo): Promise<void> {
+    const startedAt = Date.now()
+    let currentInfo = initialInfo
+    let idleRounds = 0
+
+    while (this.canWork() && Date.now() - startedAt < 45_000) {
+      const result = await this.checkParticipateResult()
+      if (result.participated) {
+        this.handleParticipated(currentInfo, result)
+        return
+      }
+
+      currentInfo = await this.enrichInfoFromPage(currentInfo)
+      this.callbacks.onFudaiInfoUpdated(currentInfo)
+      if (currentInfo.requiresShare) {
+        this.callbacks.onFudaiSkipped('福袋要求分享直播间，暂不支持，已跳过')
+        this.failureCooldownUntil = Date.now() + FAILURE_COOLDOWN_MS
+        return
+      }
+
+      this.debugLog(
+        `任务循环: comment=${currentInfo.requiresComment ? 'yes' : 'no'}, fanBadge=${currentInfo.requiresFanBadge ? 'yes' : 'no'}, remaining=${currentInfo.remainingSeconds ?? 'unknown'}`
+      )
+
+      if (currentInfo.requiresComment && (await this.hasCommentAction())) {
+        const ok = await this.handleCommentRequirement(currentInfo.commentText, { fatalOnMissing: false })
+        if (!ok) return
+        idleRounds = 0
+        await this.randomDelay(300, 700)
+        continue
+      }
+
+      if (currentInfo.requiresFanBadge && (await this.hasLotteryFanBadgeAction())) {
+        const ok = await this.handleFanBadgeRequirement(currentInfo.fanBadgeCost, { fatalOnMissing: false })
+        if (!ok) return
+        idleRounds = 0
+        await this.randomDelay(300, 700)
+        continue
+      }
+
+      if (await this.hasParticipateButton()) {
+        await this.clickParticipate(currentInfo)
+        return
+      }
+
+      idleRounds += 1
+      if (idleRounds === 2) {
+        this.debugLog('任务循环暂未找到可执行按钮，尝试重新打开/刷新福袋弹窗')
+        await this.clickVisibleFudaiIcon()
+      }
+      if (idleRounds >= 8) {
+        await this.debugLotteryContext('任务循环未找到可执行动作')
+        this.callbacks.onFudaiSkipped('未找到可执行的福袋任务按钮或参与按钮')
+        this.failureCooldownUntil = Date.now() + FAILURE_COOLDOWN_MS
+        return
+      }
+      await this.page.waitForTimeout(600).catch(() => {})
+    }
+
+    this.callbacks.onFudaiSkipped('福袋任务执行超时，停止本次参与')
+    this.failureCooldownUntil = Date.now() + FAILURE_COOLDOWN_MS
   }
 
   private createDomFudaiInfo(remainingSeconds: number | null, description: string): FudaiInfo {
@@ -1285,7 +1335,11 @@ export class FudaiService {
     return true
   }
 
-  private async handleFanBadgeRequirement(cost: number): Promise<boolean> {
+  private async handleFanBadgeRequirement(
+    cost: number,
+    options: { fatalOnMissing?: boolean } = {}
+  ): Promise<boolean> {
+    const fatalOnMissing = options.fatalOnMissing ?? true
     const config = store.store
     const stats = store.get('runStats')
     const effectiveBudget = config.diamondBudget + (config.allowDiamondProfit ? stats.diamondWonAmount || 0 : 0)
@@ -1301,6 +1355,7 @@ export class FudaiService {
         this.debugLog('未找到粉丝团按钮，但已出现参与福袋按钮，继续参与流程')
         return true
       }
+      if (!fatalOnMissing) return false
       this.callbacks.onFudaiSkipped('未找到可点击的加入粉丝团/点亮灯牌入口，已避免点击普通礼物')
       this.failureCooldownUntil = Date.now() + FAILURE_COOLDOWN_MS
       return false
@@ -1344,7 +1399,11 @@ export class FudaiService {
     return true
   }
 
-  private async handleCommentRequirement(commentText: string): Promise<boolean> {
+  private async handleCommentRequirement(
+    commentText: string,
+    options: { fatalOnMissing?: boolean } = {}
+  ): Promise<boolean> {
+    const fatalOnMissing = options.fatalOnMissing ?? true
     const text = commentText || '福袋'
 
     const oneClickStartedAt = Date.now()
@@ -1367,9 +1426,69 @@ export class FudaiService {
       return false
     }
 
+    if (!fatalOnMissing) return false
     this.callbacks.onFudaiSkipped('未找到福袋弹窗内的一键评论按钮，已跳过，避免先向直播间输入评论')
     this.failureCooldownUntil = Date.now() + FAILURE_COOLDOWN_MS
     return false
+  }
+
+  private async hasCommentAction(): Promise<boolean> {
+    return this.page
+      .evaluate(() => {
+        const viewportArea = Math.max(1, window.innerWidth * window.innerHeight)
+        const keywords = ['去发表评论', '一键发评论', '发评论参与', '评论参与', '发送评论参与', '一键评论', '发评论参与福袋', '一键发评论参与福袋']
+        const normalize = (text: string) => text.replace(/\s+/g, ' ').trim()
+        const isVisible = (element: Element) => {
+          const style = window.getComputedStyle(element)
+          const rect = element.getBoundingClientRect()
+          return (
+            style.display !== 'none' &&
+            style.visibility !== 'hidden' &&
+            Number(style.opacity || 1) > 0.05 &&
+            rect.width >= 8 &&
+            rect.height >= 8 &&
+            rect.bottom > 0 &&
+            rect.right > 0 &&
+            rect.top < window.innerHeight &&
+            rect.left < window.innerWidth &&
+            (rect.width * rect.height) / viewportArea <= 0.35
+          )
+        }
+        const hasLotteryContext = (element: Element) => {
+          let current: Element | null = element
+          for (let depth = 0; current && depth < 6; depth++) {
+            const text = normalize(current.textContent || '')
+            if (/福袋|参与条件|加入粉丝团|点亮灯牌|粉丝团点亮|倒计时|发送评论|口令/.test(text)) return true
+            current = current.parentElement
+          }
+          return false
+        }
+        const candidates = Array.from(document.querySelectorAll('button, [role="button"], div, span, p'))
+          .map((element) => {
+            const text = normalize(element.textContent || '')
+            const rect = element.getBoundingClientRect()
+            return { element, text, rect, area: rect.width * rect.height }
+          })
+          .filter(({ element, text }) =>
+            text &&
+            keywords.some((keyword) => text.includes(keyword)) &&
+            !['参与条件', '未达成'].some((keyword) => text.includes(keyword)) &&
+            isVisible(element) &&
+            hasLotteryContext(element)
+          )
+          .sort((a, b) => a.area - b.area)
+
+        ;(window as any).__luckBagDebugCandidates = candidates.slice(0, 8).map(({ rect, text, area }) => ({
+          text: text.slice(0, 80),
+          x: Math.round(rect.left),
+          y: Math.round(rect.top),
+          w: Math.round(rect.width),
+          h: Math.round(rect.height),
+          area: Math.round(area)
+        }))
+        return candidates.length > 0
+      })
+      .catch(() => false)
   }
 
   private async findCommentInputTarget(): Promise<{ x: number; y: number; text: string } | null> {
