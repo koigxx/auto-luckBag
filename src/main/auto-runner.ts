@@ -50,7 +50,7 @@ const DEFAULT_ENTER_BEFORE_SECONDS = 80
 const MAX_PENDING_VERIFY = 5
 const MAX_CANDIDATES = 5
 const DEFAULT_CANDIDATE_POOL_LIMIT = 4
-const RISK_PAUSE_MS = 10 * 60 * 1000
+const RISK_PAUSE_MS = 60 * 60 * 1000
 const CANDIDATE_TTL_MS = 30 * 60 * 1000
 const REJECTED_CANDIDATE_TTL_MS = 30 * 60 * 1000
 const VERIFY_DIRECT_ENTER_MIN_RATIO = 0.7
@@ -340,8 +340,17 @@ export class AutoRunner {
       await this.discoveryService.closeCurrentPage().catch(() => {})
       return
     }
-    const discoveredRooms = scanResult.value
+    const scanData = scanResult.value
     if (!this.state.running) return
+
+    if (scanData.riskDetected) {
+      this.log(`扫描时检测到风控页面，等待 10 秒后关闭页面...`)
+      await new Promise((resolve) => setTimeout(resolve, 10_000))
+      await this.discoveryService.closeCurrentPage().catch(() => {})
+      this.pauseForRisk(scanData.riskReason)
+      return
+    }
+    const discoveredRooms = scanData.rooms
 
     const now = Date.now()
     const preferredUrls = new Set((store.get('preferredRooms') || []).map((room) => room.url))
@@ -395,8 +404,9 @@ export class AutoRunner {
       return 0
     }
     if (result.riskDetected) {
+      this.log(`风控页面检测到，等待 10 秒后关闭页面...`)
+      await new Promise((resolve) => setTimeout(resolve, 10_000))
       await this.closeVerificationPage(result)
-      this.pendingVerify.unshift(candidate)
       this.pauseForRisk(result.riskReason)
       return 0
     }
@@ -555,9 +565,42 @@ export class AutoRunner {
   }
 
   private pauseForActiveRoom(): boolean {
-    if (this.roomManager.getAllRooms().length === 0) {
+    const rooms = this.roomManager.getAllRooms()
+    if (rooms.length === 0) {
       this.lastActiveRoomWaitLogAt = 0
       return false
+    }
+
+    // Check for stale rooms: page closed, drawAt passed, or no draw scheduled for too long
+    const now = Date.now()
+    const staleRooms: string[] = []
+    for (const room of rooms) {
+      const pageClosed = room.page && room.page.isClosed()
+      const drawPassed = typeof room.drawAt === 'number' && room.drawAt > 0 && room.drawAt + 30_000 < now
+      const noDrawTooLong = room.drawAt === null && room.remainingSeconds === null
+      if (pageClosed || drawPassed || noDrawTooLong) {
+        staleRooms.push(room.id)
+      }
+    }
+
+    if (staleRooms.length > 0) {
+      for (const roomId of staleRooms) {
+        const room = this.roomManager.getRoom(roomId)
+        const reason = room?.page?.isClosed()
+          ? '页面已关闭'
+          : (typeof room?.drawAt === 'number' && room.drawAt > 0 && room.drawAt + 30_000 < now)
+            ? '开奖时间已过'
+            : '长时间无开奖倒计时'
+        this.log(`移除过期直播间: ${room?.name || roomId}，原因=${reason}`)
+        void this.roomManager.removeRoom(roomId).catch((e: any) => {
+          this.log(`移除过期直播间失败: ${e.message}`)
+        })
+      }
+      // After cleanup, re-check
+      if (this.roomManager.getAllRooms().length === 0) {
+        this.lastActiveRoomWaitLogAt = 0
+        return false
+      }
     }
 
     if (Date.now() - this.lastActiveRoomWaitLogAt > 30_000) {
@@ -615,13 +658,19 @@ export class AutoRunner {
 
   private pauseForRisk(reason: string): void {
     const riskPausedUntil = Date.now() + RISK_PAUSE_MS
+    this.pendingVerify = []
+    this.recheckQueue = []
+    this.candidatePool.clear()
     this.state = {
       ...this.state,
       status: 'pausedByRisk',
       riskPausedUntil,
-      lastRiskReason: reason || '疑似风控'
+      lastRiskReason: reason || '疑似风控',
+      candidateCount: 0,
+      pendingVerifyCount: 0,
+      candidates: []
     }
-    this.log(`检测到风控信号，暂停扫描和验证 10 分钟：${this.state.lastRiskReason}`)
+    this.log(`检测到风控信号，已清除待验证队列和候选池，暂停扫描和验证 1 小时：${this.state.lastRiskReason}`)
     this.emitUpdate()
   }
 

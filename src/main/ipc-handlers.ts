@@ -97,8 +97,8 @@ export function setupIpcHandlers(
 
   ipcMain.handle('discovery:scan', async (_event, options?: { sourceUrl?: string; maxRooms?: number }) => {
     try {
-      const rooms = await discoveryService.scan(options)
-      return { success: true, rooms }
+      const result = await discoveryService.scan(options)
+      return { success: true, rooms: result.rooms }
     } catch (e: any) {
       return { success: false, error: e.message, rooms: [] }
     }
@@ -106,7 +106,8 @@ export function setupIpcHandlers(
 
   ipcMain.handle('discovery:addFastest', async (_event, options?: { sourceUrl?: string }) => {
     try {
-      const rooms = await discoveryService.scan({ ...options, maxRooms: 10 })
+      const result = await discoveryService.scan({ ...options, maxRooms: 10 })
+      const rooms = result.rooms
       const fastestRoom = rooms.find((room) => !roomManager.hasRoom(room.url))
       if (!fastestRoom) {
         return { success: false, error: '没有发现可添加的福袋直播间', rooms }

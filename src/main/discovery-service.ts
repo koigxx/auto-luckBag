@@ -8,6 +8,12 @@ export interface DiscoveryOptions {
   maxRooms?: number
 }
 
+export interface ScanResult {
+  rooms: DiscoveredRoom[]
+  riskDetected: boolean
+  riskReason: string
+}
+
 export interface DiscoveredRoom {
   url: string
   name: string
@@ -107,11 +113,13 @@ export class DiscoveryService {
     this.onLog = onLog
   }
 
-  async scan(options: DiscoveryOptions = {}): Promise<DiscoveredRoom[]> {
+  async scan(options: DiscoveryOptions = {}): Promise<ScanResult> {
     const sourceUrls = this.getSourceUrls(options.sourceUrl)
     const maxRooms = options.maxRooms || DEFAULT_MAX_ROOMS
     const page = await this.getPage()
     const mergedRooms = new Map<string, DiscoveredRoom>()
+    let riskDetected = false
+    let riskReason = ''
 
     for (const sourceUrl of sourceUrls) {
       const pendingResponses: Promise<void>[] = []
@@ -136,7 +144,9 @@ export class DiscoveryService {
         const challenge = await this.getChallengeReason(page)
         if (challenge) {
           this.log(`扫描入口时检测到风控页面: ${challenge}`)
-          continue
+          riskDetected = true
+          riskReason = challenge
+          break
         }
 
         await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {})
@@ -167,7 +177,7 @@ export class DiscoveryService {
     this.log(`扫描完成，发现 ${sortedRooms.length} 个直播间候选`)
     logInfo('discover', `scan complete candidates=${sortedRooms.length}`)
     await this.parkSourcePage()
-    return sortedRooms
+    return { rooms: sortedRooms, riskDetected, riskReason }
   }
 
   async verifyRoom(room: DiscoveredRoom, options: VerifyRoomOptions = {}): Promise<VerifyRoomResult> {
