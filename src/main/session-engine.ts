@@ -1,0 +1,66 @@
+import { Policy, SessionRecord, emptySession } from '../shared/policy'
+import { RuntimeRepository, allowedNow, dayKey } from './runtime-repository'
+
+export function seededRandom(seed: number): () => number {
+  let state=seed>>>0
+  return () => { state=(Math.imul(1664525,state)+1013904223)>>>0; return state/4294967296 }
+}
+export class SessionEngine {
+  private lastClockSample:{wall:number;monotonic:number}|null=null
+  constructor(private repo: RuntimeRepository, private random: () => number = Math.random,private monotonic?:()=>number) {}
+  start(policy: Policy, stopAt: number | null = null): SessionRecord {
+    const a=this.repo.account(), now=this.repo.now()
+    if(a.risks.some(r=>r.resolvedAt===null)) throw new Error('风险尚未处理，请先查看风险记录')
+    if(Object.values(a.payments).some(p=>p.state==='unresolved')) throw new Error('存在未决支付，请先核对')
+    if(!allowedNow(now,policy)) throw new Error('当前不在允许运行时段')
+    if(stopAt!==null&&stopAt<=now)throw new Error('定时停止时间已过')
+    const used=a.session.activeByDay[dayKey(now,policy.timezone)]||0
+    if(used>=policy.dailyMinutes*60000) throw new Error('今日活跃时间已达上限')
+    const seed=Math.floor(this.random()*0xffffffff), rng=seededRandom(seed)
+    const duration=(policy.sessionMin+rng()*(policy.sessionMax-policy.sessionMin))*60000
+    let allowedEnd=Infinity
+    if(policy.allowedStart!==policy.allowedEnd)for(let at=now-now%60000+60000;at<=now+duration;at+=60000){if(!allowedNow(at,policy)){allowedEnd=at;break}}
+    const hardStopAt=Math.min(now+duration,now+policy.dailyMinutes*60000-used,stopAt??Infinity,allowedEnd)
+    if(this.monotonic)this.lastClockSample={wall:now,monotonic:this.monotonic()}
+    return this.repo.change(a=>a.session={...emptySession(),activeByDay:a.session.activeByDay,policy:{...policy},phase:'running',
+      startedAt:now,drainAt:Math.max(now,hardStopAt-90000),hardStopAt,stopAt,nextResumeAt:null,lastTickAt:now,seed,reason:''})
+  }
+  tick(hasRoom: boolean): SessionRecord {
+    const now=this.repo.now()
+    let clockChanged=false
+    if(this.monotonic){const mono=this.monotonic();if(this.lastClockSample)clockChanged=Math.abs((now-this.lastClockSample.wall)-(mono-this.lastClockSample.monotonic))>5000;this.lastClockSample={wall:now,monotonic:mono}}
+    return this.repo.change(a=>{
+      const s=a.session,p=s.policy,last=s.lastTickAt
+      if(clockChanged&&!['blocked','stopped'].includes(s.phase)){s.phase='stopped';s.reason='系统时钟发生变化，请检查后手动恢复';s.nextResumeAt=null}
+      if(['running','draining'].includes(s.phase) && last!==null) {
+        const gap=now-last
+        if(gap<0 || gap>90000) { s.phase='stopped';s.reason='检测到休眠或时钟变化，请手动恢复';s.nextResumeAt=null }
+        else {
+          // Split a tick at a local calendar boundary; a tick is at most 90 seconds.
+          let from=last
+          const accountedUntil=Math.min(now,s.hardStopAt??now,s.stopAt??now)
+          while(from<accountedUntil) { const end=Math.min(accountedUntil,from+1000),day=dayKey(from,p.timezone); s.activeByDay[day]=(s.activeByDay[day]||0)+(end-from);from=end }
+        }
+      }
+      s.lastTickAt=now
+      if(s.phase==='blocked'||s.phase==='stopped') return s
+      if(s.stopAt!==null && now>=s.stopAt) {s.phase='stopped';s.reason='定时停止';s.nextResumeAt=null;return s}
+      if(a.risks.some(r=>r.resolvedAt===null)) {s.phase='blocked';s.nextResumeAt=null;return s}
+      if(s.phase==='resting') {
+        if(s.nextResumeAt!==null && now>=s.nextResumeAt) {s.phase=p.autoResume?'resume-check':'stopped';s.reason=p.autoResume?'等待恢复检查':'计划休息结束，等待手动启动'}
+        return s
+      }
+      if(s.phase==='resume-check') return s
+      const daily=s.activeByDay[dayKey(now,p.timezone)]||0
+      if(!allowedNow(now,p) || daily>=p.dailyMinutes*60000) {s.phase='stopped';s.reason='允许时段或每日活跃额度已结束';s.nextResumeAt=null;return s}
+      if(now>=(s.drainAt??Infinity)) {s.phase='draining';s.reason='停止接新任务，等待本轮收尾'}
+      if(now>=(s.hardStopAt??Infinity) || (s.phase==='draining'&&!hasRoom)) {
+        const rng=seededRandom(s.seed^0x51f15e)
+        s.phase='resting';s.nextResumeAt=now+(p.breakMin+rng()*(p.breakMax-p.breakMin))*60000;s.reason='计划休息'
+      }
+      return s
+    })
+  }
+  stop(reason='手动停止'): void {this.repo.change(a=>{a.session.phase=a.risks.some(r=>r.resolvedAt===null)?'blocked':'stopped';a.session.reason=reason;a.session.nextResumeAt=null;a.session.lastTickAt=this.repo.now()})}
+  canFinish(drawAt: number, bufferMs=25000): boolean {const s=this.repo.account().session;return s.phase==='running'&&drawAt+bufferMs<=(s.hardStopAt??0)}
+}

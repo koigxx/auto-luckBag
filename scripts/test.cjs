@@ -1,0 +1,13 @@
+const ts = require('typescript')
+const path = require('node:path')
+const fs = require('node:fs')
+const { spawnSync } = require('node:child_process')
+const root = path.resolve(__dirname, '..')
+const files = fs.readdirSync(path.join(root, 'tests')).filter(x => x.endsWith('.test.ts')).map(x => path.join(root, 'tests', x))
+const program = ts.createProgram(files, {target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,moduleResolution:ts.ModuleResolutionKind.Node10,strict:true,skipLibCheck:true,esModuleInterop:true,rootDir:root,outDir:path.join(root,'.test-output'),lib:['lib.es2022.d.ts','lib.dom.d.ts','lib.dom.iterable.d.ts'],noEmitOnError:true})
+const result = program.emit()
+const errors = ts.getPreEmitDiagnostics(program).concat(result.diagnostics)
+if(errors.length){console.error(ts.formatDiagnosticsWithColorAndContext(errors,{getCurrentDirectory:()=>root,getCanonicalFileName:x=>x,getNewLine:()=> '\n'}));process.exit(1)}
+const tests=files.map(x=>path.join(root,'.test-output','tests',path.basename(x,'.ts')+'.js'))
+const run=spawnSync(process.execPath,['--test','--test-concurrency=1',...tests],{cwd:root,stdio:'inherit'})
+process.exit(run.status??1)

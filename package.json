@@ -8,6 +8,8 @@
   "scripts": {
     "dev": "electron-vite dev",
     "typecheck": "vue-tsc -b",
+    "test": "node scripts/test.cjs",
+    "test:smoke": "npm run build && node scripts/smoke.cjs",
     "build": "electron-vite build",
     "build:win": "npm run build && electron-builder --win",
     "build:win:dir": "npm run build && electron-builder --win --dir",
@@ -34,7 +36,7 @@
   },
   "build": {
     "appId": "com.luckbag.app",
-    "productName": "抖音福袋助手",
+    "productName": "抖音福袋助手V0.3.0",
     "directories": {
       "output": "dist-electron"
     },

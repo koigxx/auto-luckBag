@@ -1,7 +1,14 @@
 export interface API {
+  insights: {
+    get: () => Promise<import('../../../shared/insights').Insights | null>
+    room: (url: string, patch: Record<string, boolean>) => Promise<{success:boolean;error?:string}>
+    payment: (id: string, state: 'confirmed' | 'failed') => Promise<{success:boolean;error?:string}>
+    resolveRisk: () => Promise<{success:boolean;error?:string}>
+    export: () => Promise<{success:boolean;error?:string;path?:string}>
+  }
   auth: {
     login: () => Promise<{ success: boolean; isLoggedIn?: boolean; error?: string }>
-    logout: () => Promise<{ success: boolean }>
+    logout: () => Promise<{ success: boolean; error?: string }>
     status: () => Promise<{ isLoggedIn: boolean }>
   }
   room: {
@@ -9,12 +16,12 @@ export interface API {
       url: string,
       name?: string
     ) => Promise<{ success: boolean; room?: import('./index').RoomInfo; error?: string }>
-    remove: (roomId: string) => Promise<{ success: boolean }>
+    remove: (roomId: string) => Promise<{ success: boolean; error?: string }>
     list: () => Promise<import('./index').RoomInfo[]>
   }
   config: {
     get: () => Promise<import('./index').AppConfig>
-    set: (config: Partial<import('./index').AppConfig>) => Promise<{ success: boolean }>
+    set: (config: Partial<import('./index').AppConfig>) => Promise<{ success: boolean; error?:string; config?:import('./index').AppConfig }>
     resetDiamondUsed: () => Promise<{ success: boolean }>
   }
   stats: {
@@ -39,6 +46,7 @@ export interface API {
     stop: () => Promise<{
       success: boolean
       state: import('./index').AutoRunState
+      error?: string
     }>
     status: () => Promise<import('./index').AutoRunState>
   }

@@ -10,6 +10,8 @@ import { AutoRunner } from './auto-runner'
 import { setupIpcHandlers } from './ipc-handlers'
 import { setupAppMenu } from './app-menu'
 import { installPipeErrorGuards, logInfo } from './logger'
+import { execution,repository,sessionEngine,policy,haltPages,assertActive,paymentReason } from './runtime'
+import { store } from './store'
 
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
@@ -20,15 +22,16 @@ const authService = new AuthService(browserManager)
 const roomManager = new RoomManager(browserManager)
 const discoveryService = new DiscoveryService(browserManager)
 const statsService = new StatsService()
-const autoRunner = new AutoRunner(discoveryService, roomManager, statsService)
+const autoRunner = new AutoRunner(discoveryService, roomManager, statsService, {execution,repository,sessionEngine,policy,haltPages,assertActive,paymentReason,store,now:Date.now,setTimer:fn=>setInterval(fn,1000),clearTimer:timer=>clearInterval(timer)})
+autoRunner.setResumeCheck(() => authService.validateSession())
 
 installPipeErrorGuards()
 
 function createWindow(): void {
   logInfo('app', 'creating main window')
   mainWindow = new BrowserWindow({
-    width: 900,
-    height: 700,
+    width: 1180,
+    height: 820,
     minWidth: 800,
     minHeight: 600,
     show: false,
@@ -128,7 +131,12 @@ app.on('window-all-closed', () => {
   if (isQuitting) app.quit()
 })
 
-app.on('before-quit', async () => {
+let cleanupComplete = false
+app.on('before-quit', async (event) => {
+  if (cleanupComplete) return
+  event.preventDefault()
+  if (isQuitting && cleanupStarted) return
+  cleanupStarted = true
   isQuitting = true
   logInfo('app', 'before quit, cleanup start')
   await autoRunner.stop('应用退出')
@@ -136,4 +144,7 @@ app.on('before-quit', async () => {
   await discoveryService.close()
   await browserManager.close()
   logInfo('app', 'cleanup done')
+  cleanupComplete = true
+  app.quit()
 })
+let cleanupStarted = false

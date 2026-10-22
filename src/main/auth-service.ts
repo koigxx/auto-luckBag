@@ -1,98 +1,57 @@
-import { BrowserContext } from 'playwright'
+import { BrowserContext,Page } from 'playwright'
 import { BrowserManager } from './browser-manager'
 import { app } from 'electron'
 import path from 'path'
 import fs from 'fs'
-import { logError } from './logger'
+import { createHash } from 'crypto'
+import { repository } from './runtime'
+import { store } from './store'
 
-const AUTH_FILE = path.join(app.getPath('userData'), 'auth.json')
-
+const AUTH_FILE=path.join(app.getPath('userData'),'auth.json')
 export class AuthService {
-  private browserManager: BrowserManager
-  private isLoggedIn = false
-
-  constructor(browserManager: BrowserManager) {
-    this.browserManager = browserManager
-    this.browserManager.setStorageStatePath(AUTH_FILE)
-  }
-
-  async login(): Promise<boolean> {
-    const context = await this.browserManager.getContext()
-
-    if (this.hasSavedAuth()) {
-      const page = await context.newPage()
-      await page.goto('https://live.douyin.com', { waitUntil: 'domcontentloaded' })
-      await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {})
-
-      const isValid = await this.checkLoginStatus(page)
-      await page.close()
-      if (isValid) {
-        this.isLoggedIn = true
-        return true
+  private isLoggedIn=false
+  private page:Page|null=null
+  private loggingIn=false
+  constructor(private browser:BrowserManager){browser.setStorageStatePath(AUTH_FILE)}
+  async login():Promise<boolean> {
+    if(this.loggingIn)throw new Error('登录窗口已打开')
+    this.loggingIn=true
+    const context=await this.browser.getContext()
+    try {
+      this.page=await context.newPage()
+      await this.page.goto('https://live.douyin.com',{waitUntil:'domcontentloaded',timeout:30000})
+      const until=Date.now()+5*60000
+      while(Date.now()<until&&!this.page.isClosed()) {
+        const id=await this.accountId(context)
+        // A generic live-stream avatar and CSRF cookie are not evidence of a logged-in viewer.
+        const ownAvatar=await this.page.locator('[data-e2e="user-avatar"], [data-e2e="user-info"]').first().isVisible().catch(()=>false)
+        if(id&&ownAvatar) {
+          repository.bind(id,{spent:store.get('diamondUsed'),stats:{...store.get('runStats')},rooms:store.get('preferredRooms')||[]})
+          await context.storageState({path:AUTH_FILE})
+          this.isLoggedIn=true
+          return true
+        }
+        await this.page.waitForTimeout(1500)
       }
-    }
-
-    const page = await context.newPage()
-    await page.goto('https://live.douyin.com', { waitUntil: 'domcontentloaded' })
-    this.isLoggedIn = await this.waitForLogin(page)
-
-    if (this.isLoggedIn) {
-      await this.saveAuth(context)
-    }
-
-    return this.isLoggedIn
-  }
-
-  getLoginStatus(): boolean {
-    return this.isLoggedIn
-  }
-
-  async logout(): Promise<void> {
-    this.isLoggedIn = false
-    if (fs.existsSync(AUTH_FILE)) {
-      fs.unlinkSync(AUTH_FILE)
-    }
-    await this.browserManager.closeContext()
-  }
-
-  private async waitForLogin(page: any): Promise<boolean> {
-    const timeout = 5 * 60 * 1000
-    const startTime = Date.now()
-
-    while (Date.now() - startTime < timeout) {
-      if (await this.checkLoginStatus(page)) return true
-      await page.waitForTimeout(2000)
-    }
-    return false
-  }
-
-  private async checkLoginStatus(page: any): Promise<boolean> {
-    try {
-      const loginIndicator = await page.$(
-        '.user-card, .avatar-icon, [data-e2e="user-avatar"], [class*="avatar"]'
-      )
-      if (loginIndicator) return true
-
-      const cookies = await page.context().cookies()
-      return cookies.some(
-        (cookie: { name: string }) =>
-          cookie.name === 'sessionid' || cookie.name === 'passport_csrf_token'
-      )
-    } catch {
       return false
-    }
+    } finally {await this.page?.close().catch(()=>{});this.page=null;this.loggingIn=false}
   }
-
-  private async saveAuth(context: BrowserContext): Promise<void> {
-    try {
-      const state = await context.storageState()
-      fs.writeFileSync(AUTH_FILE, JSON.stringify(state, null, 2))
-    } catch (e) {
-      logError('auth', '保存登录状态失败', e)
-    }
+  getLoginStatus():boolean{return this.isLoggedIn&&!!repository.read().activeAccount}
+  async validateSession():Promise<boolean> {
+    if(!this.getLoginStatus())return false
+    const id=await this.accountId(await this.browser.getContext())
+    return !!id&&id===repository.read().activeAccount
   }
-
-  private hasSavedAuth(): boolean {
-    return fs.existsSync(AUTH_FILE)
+  async logout():Promise<void> {
+    this.isLoggedIn=false;await this.page?.close().catch(()=>{});repository.unbind()
+    if(fs.existsSync(AUTH_FILE))fs.unlinkSync(AUTH_FILE)
+    await this.browser.closeContext()
+  }
+  private async accountId(context:BrowserContext):Promise<string|null> {
+    const cookies=(await context.cookies('https://live.douyin.com')).filter(c=>c.value&&(c.expires===-1||c.expires>Date.now()/1000))
+    if(!cookies.some(c=>['sessionid','sessionid_ss'].includes(c.name)))return null
+    const uid=cookies.find(c=>c.name==='uid_tt')||cookies.find(c=>c.name==='uid_tt_ss')
+    // Never create a fresh budget identity from a rotating session token.
+    return uid?createHash('sha256').update(`douyin-account:${uid.value}`).digest('hex'):null
   }
 }

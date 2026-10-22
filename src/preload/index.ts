@@ -1,6 +1,13 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
 const api = {
+  insights: {
+    get: () => ipcRenderer.invoke('insights:get'),
+    room: (url: string, patch: Record<string, boolean>) => ipcRenderer.invoke('insights:room', url, patch),
+    payment: (id: string, state: 'confirmed' | 'failed') => ipcRenderer.invoke('insights:payment', id, state),
+    resolveRisk: () => ipcRenderer.invoke('insights:resolveRisk'),
+    export: () => ipcRenderer.invoke('insights:export')
+  },
   // 登录
   auth: {
     login: () => ipcRenderer.invoke('auth:login'),
@@ -47,6 +54,7 @@ const api = {
   },
   // 事件监听
   on: (channel: string, callback: (...args: any[]) => void) => {
+    if (!['room:update','room:removed','log:add','run-stats:update','auto-run:update'].includes(channel)) throw new Error('Unsupported event')
     const subscription = (_event: any, ...args: any[]) => callback(...args)
     ipcRenderer.on(channel, subscription)
     return () => ipcRenderer.removeListener(channel, subscription)

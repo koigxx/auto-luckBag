@@ -1,6 +1,8 @@
+import type { SessionRecord } from '../../../shared/policy'
 export type RoomStatus = 'loading' | 'monitoring' | 'grabbing' | 'error' | 'idle'
 
 export interface RoomInfo {
+  phase?: string
   id: string
   url: string
   name: string
@@ -12,37 +14,7 @@ export interface RoomInfo {
   drawAt: number | null
 }
 
-export interface FudaiTypes {
-  all: boolean
-  physical: boolean
-  diamond: boolean
-}
-
-export interface RunStats {
-  participated: number
-  physicalWins: number
-  diamondWins: number
-  diamondWonAmount: number
-  couponWins: number
-  lastStartedAt: number | null
-  lastStoppedAt: number | null
-}
-
-export interface AppConfig {
-  language: 'zh-CN' | 'en-US'
-  fudaiTypes: FudaiTypes
-  diamondBudget: number
-  diamondUsed: number
-  allowDiamondProfit: boolean
-  autoFollow: boolean
-  debugLogs: boolean
-  scanIntervalSeconds: number
-  enterBeforeSeconds: number
-  candidatePoolLimit: number
-  rooms: { id: string; url: string; name: string }[]
-  preferredRooms: { id: string; url: string; name: string }[]
-  runStats: RunStats
-}
+export type { AppConfig, FudaiTypes, RunStats } from '../../../shared/config'
 
 export interface LogEntry {
   roomId: string
@@ -51,6 +23,7 @@ export interface LogEntry {
 }
 
 export interface Stats {
+  diamondReserved?: number
   totalFudai: number
   activeRooms: number
   diamondBudget: number
@@ -83,8 +56,16 @@ export type AutoRunStatus =
   | 'waiting'
   | 'entering'
   | 'pausedByRisk'
+  | 'running'
+  | 'draining'
+  | 'resting'
+  | 'resume-check'
+  | 'blocked'
 
 export interface AutoRunState {
+  waitingReason?: string
+  resumeRemainingSeconds?: number | null
+  session?: SessionRecord
   running: boolean
   status: AutoRunStatus
   sourceUrl: string
@@ -97,7 +78,15 @@ export interface AutoRunState {
   pendingVerifyCount: number
   enterBeforeSeconds: number
   candidatePoolLimit: number
-  candidates: VerifiedFudaiRoom[]
+  candidates: {
+    url: string
+    name: string
+    score: number
+    remainingSeconds: number | null
+    reason?: string
+    probability?: number | null
+    mode?: string
+  }[]
   riskPausedUntil: number | null
   lastRiskReason: string
 }

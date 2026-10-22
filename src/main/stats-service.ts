@@ -1,75 +1,16 @@
-import { store, RunStats } from './store'
+import { RunStats } from './store'
 import { FudaiGrabResult } from './fudai-service'
-
+import { repository } from './runtime'
 export class StatsService {
-  private onUpdate: ((stats: RunStats) => void) | null = null
-
-  setOnUpdate(onUpdate: (stats: RunStats) => void): void {
-    this.onUpdate = onUpdate
+  private update:((stats:RunStats)=>void)|null=null
+  setOnUpdate(fn:(stats:RunStats)=>void):void{this.update=fn}
+  getStats():RunStats {
+    if(repository.read().activeAccount)return repository.stats()
+    return {participated:0,physicalWins:0,diamondWins:0,diamondWonAmount:0,couponWins:0,lastStartedAt:null,lastStoppedAt:null}
   }
-
-  getStats(): RunStats {
-    const stats = store.get('runStats')
-    return {
-      ...stats,
-      diamondWonAmount: stats.diamondWonAmount || 0
-    }
-  }
-
-  markStarted(): void {
-    this.patch({
-      lastStartedAt: Date.now()
-    })
-  }
-
-  markStopped(): void {
-    this.patch({
-      lastStoppedAt: Date.now()
-    })
-  }
-
-  recordParticipation(result: FudaiGrabResult): void {
-    const current = this.getStats()
-    const next: RunStats = {
-      ...current,
-      participated: current.participated + 1
-    }
-
-    if (result.prizeType === 'physical') {
-      next.physicalWins += 1
-    } else if (result.prizeType === 'diamond') {
-      next.diamondWins += 1
-      next.diamondWonAmount = (next.diamondWonAmount || 0) + Math.max(0, Math.floor(result.diamondAmount || 0))
-    } else if (result.prizeType === 'coupon') {
-      next.couponWins += 1
-    }
-
-    this.setStats(next)
-  }
-
-  reset(): RunStats {
-    const resetStats: RunStats = {
-      participated: 0,
-      physicalWins: 0,
-      diamondWins: 0,
-      diamondWonAmount: 0,
-      couponWins: 0,
-      lastStartedAt: null,
-      lastStoppedAt: null
-    }
-    this.setStats(resetStats)
-    return resetStats
-  }
-
-  private patch(partial: Partial<RunStats>): void {
-    this.setStats({
-      ...this.getStats(),
-      ...partial
-    })
-  }
-
-  private setStats(stats: RunStats): void {
-    store.set('runStats', stats)
-    this.onUpdate?.(stats)
-  }
+  publish():void{this.update?.(this.getStats())}
+  markStarted():void{this.publish()}
+  markStopped():void{this.publish()}
+  recordParticipation(_result:FudaiGrabResult):void{this.publish()}
+  reset():RunStats{repository.change(a=>{a.statsSince=Date.now()});this.publish();return this.getStats()}
 }

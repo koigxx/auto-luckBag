@@ -63,10 +63,17 @@ src/
 
 ## 开发命令
 
+日常修改只执行必要的测试、类型检查和代码编译，不自动生成安装包。仅在用户明确要求安装包、便携目录或发布产物时执行 `build:win` 系列或 electron-builder 打包命令；历史打包记录不构成后续打包要求。
+
 ```bash
 npm run dev          # 启动开发模式
-npm run build        # 构建生产版本
-npm run build:win    # 构建 Windows 安装包
+npm run build        # 编译代码，不生成安装包
+```
+
+仅在用户明确要求 Windows 安装包时：
+
+```bash
+npm run build:win
 ```
 
 ## 编码规范

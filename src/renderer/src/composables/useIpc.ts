@@ -1,294 +1,201 @@
 import { ref, onMounted, onUnmounted } from 'vue'
-import type {
-  RoomInfo,
-  AppConfig,
-  LogEntry,
-  Stats,
-  DiscoveredRoom,
-  RunStats,
-  AutoRunState
-} from '../types'
+import type { RoomInfo, AppConfig, LogEntry, Stats, RunStats, AutoRunState } from '../types'
+import type { Insights } from '../../../shared/insights'
 
 export function useIpc() {
   const isLoggedIn = ref(false)
+  const ready = ref(false)
   const rooms = ref<RoomInfo[]>([])
   const config = ref<AppConfig | null>(null)
   const logs = ref<LogEntry[]>([])
   const stats = ref<Stats | null>(null)
   const runStats = ref<RunStats | null>(null)
   const autoRunState = ref<AutoRunState | null>(null)
-  const discoveredRooms = ref<DiscoveredRoom[]>([])
-  const isScanningDiscovery = ref(false)
-  const discoveryStatus = ref('')
+  const insights = ref<Insights | null>(null)
+  const busy = ref<Record<string, boolean>>({})
+  const notice = ref<{ text: string; kind: 'success' | 'error' | 'info' } | null>(null)
+  const unsubscribers: (() => void)[] = []
+  let poll: ReturnType<typeof setInterval> | undefined
+  let statsTimer: ReturnType<typeof setTimeout> | undefined
+  let noticeTimer: ReturnType<typeof setTimeout> | undefined
+  let disposed = false
+  let refreshing = false
+  let lastErrorAction: string | null = null
 
-  let unsubRoomUpdate: (() => void) | null = null
-  let unsubLogAdd: (() => void) | null = null
-  let unsubRoomRemoved: (() => void) | null = null
-  let unsubRunStats: (() => void) | null = null
-  let unsubAutoRun: (() => void) | null = null
-  let roomCountdownTimer: number | null = null
-
+  const tr = (zh: string, en: string) => (config.value?.language === 'en-US' ? en : zh)
+  function notify(text: string, kind: 'success' | 'error' | 'info' = 'success') {
+    if (noticeTimer) clearTimeout(noticeTimer)
+    notice.value = { text, kind }
+    if (kind === 'success')
+      noticeTimer = setTimeout(() => {
+        notice.value = null
+      }, 6000)
+  }
+  async function action<T>(key: string, fn: () => Promise<T>): Promise<T | null> {
+    if (busy.value[key]) return null
+    busy.value[key] = true
+    try {
+      const result = await fn()
+      if (result && notice.value?.kind === 'error' && lastErrorAction === key) notice.value = null
+      return result
+    } catch (e: any) {
+      lastErrorAction = key
+      notify(e.message || tr('操作失败，请重试。', 'The action failed. Please try again.'), 'error')
+      return null
+    } finally {
+      busy.value[key] = false
+    }
+  }
+  function requireSuccess(result: { success: boolean; error?: string }) {
+    if (!result.success)
+      throw new Error(
+        result.error || tr('操作未完成，请重试。', 'The action did not complete. Please retry.')
+      )
+  }
+  async function refreshStats() {
+    const value = await window.api.stats.get()
+    if (!disposed) stats.value = value
+  }
+  async function refreshInsights() {
+    if (refreshing || disposed) return
+    refreshing = true
+    try {
+      insights.value = isLoggedIn.value ? await window.api.insights.get() : null
+    } finally {
+      refreshing = false
+    }
+  }
+  function scheduleRefresh() {
+    if (statsTimer) return
+    statsTimer = setTimeout(() => {
+      statsTimer = undefined
+      void refreshStats().catch(() => {})
+    }, 200)
+  }
+  function upsertRoom(room: RoomInfo) {
+    const index = rooms.value.findIndex((item) => item.id === room.id)
+    if (index < 0) rooms.value.push(room)
+    else rooms.value[index] = room
+  }
+  async function refreshAccount() {
+    const [auth, currentConfig, currentRooms, currentStats, state] = await Promise.all([
+      window.api.auth.status(),
+      window.api.config.get(),
+      window.api.room.list(),
+      window.api.runStats.get(),
+      window.api.autoRun.status()
+    ])
+    if (disposed) return
+    isLoggedIn.value = auth.isLoggedIn
+    config.value = currentConfig
+    rooms.value = currentRooms
+    runStats.value = currentStats
+    autoRunState.value = state
+    await Promise.all([refreshStats(), refreshInsights()])
+  }
   onMounted(async () => {
-    const authStatus = await window.api.auth.status()
-    isLoggedIn.value = authStatus.isLoggedIn
-
-    rooms.value = await window.api.room.list()
-    config.value = await window.api.config.get()
-    stats.value = await window.api.stats.get()
-    runStats.value = await window.api.runStats.get()
-    autoRunState.value = await window.api.autoRun.status()
-
-    unsubRoomUpdate = window.api.on('room:update', (room: RoomInfo) => {
-      upsertRoom(room)
-      refreshStats()
-    })
-
-    unsubRoomRemoved = window.api.on('room:removed', (roomId: string) => {
-      rooms.value = rooms.value.filter((room) => room.id !== roomId)
-      refreshStats()
-    })
-
-    unsubLogAdd = window.api.on('log:add', (entry: LogEntry) => {
-      logs.value.push(entry)
-      if (logs.value.length > 500) {
-        logs.value = logs.value.slice(-500)
-      }
-      refreshStats()
-    })
-
-    unsubRunStats = window.api.on('run-stats:update', (entry: RunStats) => {
-      runStats.value = entry
-      if (config.value) config.value.runStats = entry
-    })
-
-    unsubAutoRun = window.api.on('auto-run:update', (entry: AutoRunState) => {
-      autoRunState.value = entry
-    })
-
-    roomCountdownTimer = window.setInterval(() => {
-      rooms.value = rooms.value.map((room) => ({
-        ...room,
-        remainingSeconds:
-          typeof room.drawAt === 'number' && room.drawAt > 0
-            ? Math.max(0, Math.ceil((room.drawAt - Date.now()) / 1000))
-            : typeof room.remainingSeconds === 'number' && room.remainingSeconds > 0
-              ? room.remainingSeconds - 1
-              : room.remainingSeconds
-      }))
-    }, 1000)
+    unsubscribers.push(
+      window.api.on('room:update', (room: RoomInfo) => {
+        upsertRoom(room)
+        scheduleRefresh()
+      }),
+      window.api.on('room:removed', (id: string) => {
+        rooms.value = rooms.value.filter((r) => r.id !== id)
+        scheduleRefresh()
+      }),
+      window.api.on('log:add', (entry: LogEntry) => {
+        logs.value = [...logs.value, entry].slice(-500)
+      }),
+      window.api.on('run-stats:update', (entry: RunStats) => {
+        runStats.value = entry
+        scheduleRefresh()
+      }),
+      window.api.on('auto-run:update', (entry: AutoRunState) => {
+        autoRunState.value = entry
+      })
+    )
+    await action('initialize', refreshAccount)
+    ready.value = true
+    if (!disposed)
+      poll = setInterval(() => {
+        void refreshInsights().catch(() => {})
+      }, 5000)
   })
-
   onUnmounted(() => {
-    unsubRoomUpdate?.()
-    unsubRoomRemoved?.()
-    unsubLogAdd?.()
-    unsubRunStats?.()
-    unsubAutoRun?.()
-    if (roomCountdownTimer !== null) {
-      window.clearInterval(roomCountdownTimer)
-      roomCountdownTimer = null
-    }
+    disposed = true
+    unsubscribers.forEach((fn) => fn())
+    if (poll) clearInterval(poll)
+    if (statsTimer) clearTimeout(statsTimer)
+    if (noticeTimer) clearTimeout(noticeTimer)
   })
-
-  async function login() {
-    const result = await window.api.auth.login()
-    isLoggedIn.value = result.isLoggedIn === true
-    if (!result.success) {
-      addSystemLog(result.error || '登录失败')
-    }
-    return result
-  }
-
-  async function logout() {
-    await window.api.auth.logout()
-    isLoggedIn.value = false
-  }
-
-  async function addRoom(url: string, name?: string) {
-    const result = await window.api.room.add(url, name)
-    if (result.success && result.room) {
-      upsertRoom(result.room)
+  const login = () =>
+    action('login', async () => {
+      const result = await window.api.auth.login()
+      await refreshAccount()
+      requireSuccess(result)
+      notify(tr('账号已连接，可以开始运行。', 'Account connected. You can start a run.'))
+      return true
+    })
+  const logout = () =>
+    action('logout', async () => {
+      requireSuccess(await window.api.auth.logout())
+      await refreshAccount()
+      notify(tr('已退出账号并停止任务。', 'Signed out and stopped all tasks.'))
+      return true
+    })
+  const addRoom = (url: string, name?: string) =>
+    action('addRoom', async () => {
+      const result = await window.api.room.add(url, name)
+      requireSuccess(result)
+      if (result.room) upsertRoom(result.room)
+      autoRunState.value = await window.api.autoRun.status()
+      await Promise.all([refreshStats(), refreshInsights()])
+      notify(tr('验证通过，已开始参与该直播间。', 'Room verified and participation started.'))
+      return true
+    })
+  const removeRoom = (id: string) =>
+    action(`room:${id}`, async () => {
+      requireSuccess(await window.api.room.remove(id))
+      rooms.value = rooms.value.filter((room) => room.id !== id)
       await refreshStats()
-    } else {
-      addSystemLog(result.error || '添加直播间失败')
-    }
-    return result
-  }
-
-  async function scanDiscovery(sourceUrl?: string) {
-    isScanningDiscovery.value = true
-    discoveryStatus.value = '正在扫描直播入口...'
-    addSystemLog('开始自动发现福袋直播间')
-    try {
-      const result = await window.api.discovery.scan({ sourceUrl, maxRooms: 20 })
-      if (result.success) {
-        discoveredRooms.value = result.rooms
-        discoveryStatus.value =
-          result.rooms.length > 0
-            ? `发现 ${result.rooms.length} 个候选直播间`
-            : '未发现福袋候选，请稍后再试或更换扫描入口'
-        addSystemLog(`自动发现完成，候选直播间 ${result.rooms.length} 个`)
-      } else {
-        discoveryStatus.value = result.error || '自动发现失败'
-        addSystemLog(result.error || '自动发现失败')
-      }
-      return result
-    } finally {
-      isScanningDiscovery.value = false
-    }
-  }
-
-  async function addDiscoveredRoom(room: DiscoveredRoom) {
-    return addRoom(room.url, room.name)
-  }
-
-  async function addFastestDiscoveredRoom(sourceUrl?: string) {
-    isScanningDiscovery.value = true
-    discoveryStatus.value = '正在扫描并尝试添加最快开奖直播间...'
-    addSystemLog('开始扫描并添加最快开奖直播间')
-    try {
-      const result = await window.api.discovery.addFastest({ sourceUrl })
-      if (result.rooms) {
-        discoveredRooms.value = result.rooms
-      }
-      if (result.success && result.room) {
-        upsertRoom(result.room)
-        discoveryStatus.value = '已添加最快开奖候选直播间'
-        if (result.discoveredRoom) {
-          addSystemLog(`已添加快开奖直播间: ${result.discoveredRoom.name}`)
-        }
-        await refreshStats()
-      } else {
-        discoveryStatus.value = result.error || '没有可添加的快开奖直播间'
-        addSystemLog(result.error || '没有可添加的快开奖直播间')
-      }
-      return result
-    } finally {
-      isScanningDiscovery.value = false
-    }
-  }
-
-  async function startAutoRun(options: {
-    sourceUrl?: string
-    scanIntervalSeconds?: number
-    stopAfterMinutes?: number
-    enterBeforeSeconds?: number
-    candidatePoolLimit?: number
-  }) {
-    const now = Date.now()
-    autoRunState.value = {
-      running: true,
-      status: 'discovering',
-      sourceUrl: options.sourceUrl || '',
-      scanIntervalSeconds: options.scanIntervalSeconds || 40,
-      stopAt: options.stopAfterMinutes ? now + options.stopAfterMinutes * 60 * 1000 : null,
-      startedAt: now,
-      lastScanAt: now,
-      nextScanAt: now,
-      candidateCount: autoRunState.value?.candidateCount || 0,
-      pendingVerifyCount: autoRunState.value?.pendingVerifyCount || 0,
-      enterBeforeSeconds: options.enterBeforeSeconds || 75,
-      candidatePoolLimit: Math.min(5, Math.max(1, options.candidatePoolLimit || 4)),
-      candidates: autoRunState.value?.candidates || [],
-      riskPausedUntil: autoRunState.value?.riskPausedUntil || null,
-      lastRiskReason: autoRunState.value?.lastRiskReason || ''
-    }
-    addSystemLog('已点击启动，正在启动自动运行')
-
-    try {
+      return true
+    })
+  const startAutoRun = (options: { sourceUrl?: string; stopAfterMinutes?: number } = {}) =>
+    action('start', async () => {
       const result = await window.api.autoRun.start(options)
       autoRunState.value = result.state
-      if (!result.success) {
-        addSystemLog(result.error || '自动运行启动失败')
-      }
-      return result
-    } catch (e: any) {
-      autoRunState.value = {
-        ...autoRunState.value,
-        running: false,
-        status: 'stopped',
-        nextScanAt: null
-      }
-      addSystemLog(`自动运行启动异常: ${e.message || e}`)
-      return {
-        success: false,
-        error: e.message || String(e),
-        state: autoRunState.value
-      }
-    }
-  }
-
-  async function stopAutoRun() {
-    if (autoRunState.value) {
-      autoRunState.value = {
-        ...autoRunState.value,
-        running: false,
-        status: 'stopped',
-        nextScanAt: null
-      }
-    }
-    addSystemLog('已点击停止，正在停止自动运行')
-    try {
+      requireSuccess(result)
+      notify(tr('运行已启动。', 'Run started.'))
+      return true
+    })
+  const stopAutoRun = () =>
+    action('stop', async () => {
       const result = await window.api.autoRun.stop()
       autoRunState.value = result.state
-      return result
-    } catch (e: any) {
-      addSystemLog(`自动运行停止异常: ${e.message || e}`)
-      throw e
-    }
-  }
-
-  async function resetRunStats() {
-    runStats.value = await window.api.runStats.reset()
-    if (config.value) config.value.runStats = runStats.value
-    await refreshStats()
-  }
-
-  async function removeRoom(roomId: string) {
-    await window.api.room.remove(roomId)
-    rooms.value = rooms.value.filter((room) => room.id !== roomId)
-    await refreshStats()
-  }
-
-  async function updateConfig(partial: Partial<AppConfig>) {
-    await window.api.config.set(partial)
-    config.value = { ...config.value!, ...partial }
-    await refreshStats()
-  }
-
-  async function resetDiamondUsed() {
-    await window.api.config.resetDiamondUsed()
-    if (config.value) {
-      config.value.diamondUsed = 0
-    }
-    await refreshStats()
-  }
-
-  async function refreshStats() {
-    stats.value = await window.api.stats.get()
-  }
-
-  function upsertRoom(room: RoomInfo) {
-    const idx = rooms.value.findIndex((item) => item.id === room.id)
-    if (idx >= 0) {
-      rooms.value[idx] = room
-    } else {
-      rooms.value.push(room)
-    }
-  }
-
-  function addSystemLog(message: string) {
-    logs.value.push({
-      roomId: 'system',
-      message,
-      time: Date.now()
+      requireSuccess(result)
+      await refreshAccount()
+      notify(tr('已停止，后续自动恢复已取消。', 'Stopped. Scheduled resume is cancelled.'))
+      return true
     })
-    if (logs.value.length > 500) {
-      logs.value = logs.value.slice(-500)
-    }
-  }
-
+  const updateConfig = (partial: Partial<AppConfig>) =>
+    action('save', async () => {
+      const result = await window.api.config.set(partial)
+      requireSuccess(result)
+      config.value = result.config || (await window.api.config.get())
+      await Promise.all([refreshStats(), refreshInsights()])
+      return true
+    })
+  const resetRunStats = () =>
+    action('reset', async () => {
+      runStats.value = await window.api.runStats.reset()
+      await Promise.all([refreshStats(), refreshInsights()])
+      notify(
+        tr('展示统计已重置，支出账本保持不变。', 'Display totals reset. The spending ledger is unchanged.')
+      )
+      return true
+    })
   return {
+    ready,
     isLoggedIn,
     rooms,
     config,
@@ -296,21 +203,21 @@ export function useIpc() {
     stats,
     runStats,
     autoRunState,
-    discoveredRooms,
-    isScanningDiscovery,
-    discoveryStatus,
+    insights,
+    busy,
+    notice,
+    notify,
+    action,
+    requireSuccess,
     login,
     logout,
     addRoom,
-    scanDiscovery,
-    addDiscoveredRoom,
-    addFastestDiscoveredRoom,
+    removeRoom,
     startAutoRun,
     stopAutoRun,
-    resetRunStats,
-    removeRoom,
     updateConfig,
-    resetDiamondUsed,
-    refreshStats
+    resetRunStats,
+    refreshInsights,
+    retry: () => action('initialize', refreshAccount)
   }
 }
