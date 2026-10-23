@@ -3,7 +3,7 @@ import fs from 'fs'
 import { RuntimeData, validatePolicy } from '../shared/policy'
 import { RuntimeRepository, emptyRuntime, allowedNow, dayKey } from './runtime-repository'
 import { SessionEngine } from './session-engine'
-import { ExecutionGate, checkSignal, delay, navigationQuotaReadyAt } from './execution-gate'
+import { ExecutionGate, checkSignal, delay, navigationQuotaReadyAt, navigationSpacingReadyAt, isDiscoveryUrl } from './execution-gate'
 import { store } from './store'
 import { defaults } from '../shared/config'
 import { validateConfigPatch } from '../shared/config-validation'
@@ -41,6 +41,8 @@ export const repository = new RuntimeRepository({
 repository.recover()
 export const sessionEngine = new SessionEngine(repository, Math.random, () => performance.now())
 export const execution = new ExecutionGate()
+let executionLog: (message: string) => void = () => {}
+export function setExecutionLogger(logger: (message: string) => void): void { executionLog = logger }
 export const policy = () => validatePolicy(store.get('policy'))
 const stopListeners = new Set<() => Promise<void>>()
 export function onHalt(listener: () => Promise<void>): void {
@@ -87,10 +89,13 @@ export async function perform<T>(
       if (navigationQuotaReadyAt(a.navigations, p, now, navigation.fresh) > now)
         throw new Error('导航或新房探索小时额度已达上限')
       // Draw the spacing once, not on each polling tick. Every source shares this queue.
-      const last = a.navigations.at(-1)?.at || 0
       const spacing =
         (p.navigationMinSeconds + Math.random() * (p.navigationMaxSeconds - p.navigationMinSeconds)) * 1000
-      await delay(Math.max(0, last + spacing - now), signal)
+      const readyAt = navigationSpacingReadyAt(a.navigations, navigation.url, spacing, now)
+      if (readyAt - now >= 1000) executionLog(
+        `${isDiscoveryUrl(navigation.url) ? '首页扫描' : '直播间导航'}等待间隔约 ${Math.ceil((readyAt - now) / 1000)} 秒，预计 ${new Date(readyAt).toLocaleTimeString('zh-CN', {timeZone:p.timezone,hour12:false})} 继续；当前保存的导航间隔 ${p.navigationMinSeconds}–${p.navigationMaxSeconds} 秒，重启不清除最近访问记录`
+      )
+      await delay(readyAt - now, signal)
       assertActive(signal, true)
       repository.change((a) => {
         a.navigations = [

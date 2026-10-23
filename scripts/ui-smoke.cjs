@@ -224,7 +224,11 @@ module.exports = async function verifyUI(config, output) {
       }
       window.api = {
         auth: {
-          status: async () => ({ isLoggedIn: fixture.loggedIn }),
+          status: async (force = false) => {
+            const mode = new URL(location.href).searchParams.get('auth')
+            if (force && mode === 'unknown') fixture.loggedIn = true
+            return { isLoggedIn: fixture.loggedIn, state: fixture.loggedIn ? 'connected' : mode || 'signed-out', checkedAt: null }
+          },
           login: async () => {
             count('login')
             fixture.loggedIn = true
@@ -240,9 +244,11 @@ module.exports = async function verifyUI(config, output) {
         config: {
           get: async () => copy(fixture.config),
           set: async (patch) => {
+            // Match the IPC boundary: JSON copying would silently hide Vue Proxy errors.
+            const serialized = structuredClone(patch)
             count('save')
             if (fixture.rejectSave) return { success: false, error: '模拟保存失败，请重试' }
-            Object.assign(fixture.config, copy(patch))
+            Object.assign(fixture.config, serialized)
             fixture.insights.budget.effective = fixture.config.diamondBudget
             fixture.insights.budget.remaining = Math.max(0, fixture.config.diamondBudget - 7)
             return { success: true, config: copy(fixture.config) }
@@ -541,6 +547,16 @@ module.exports = async function verifyUI(config, output) {
       await nav('运行面板').click()
       await page.screenshot({ path: path.join(output, `ui-narrow-${size.width}.png`), fullPage: true })
     }
+    await page.setViewportSize({width:1180,height:820})
+    await page.goto('https://fixture.local/?auth=unknown')
+    await page.getByRole('heading',{name:'暂时无法验证登录状态'}).waitFor()
+    check(await page.getByText('已保留原登录信息。', {exact:false}).isVisible(), 'unknown retains saved login and explains retry')
+    await page.getByRole('button',{name:'重新校验',exact:true}).click()
+    await page.getByText('已连接',{exact:true}).waitFor()
+    check(!(await page.evaluate(()=>window.__fixture.calls.login)), 'background retry does not open manual login')
+    await page.goto('https://fixture.local/?auth=expired')
+    await page.getByRole('heading',{name:'登录已失效，请重新登录'}).waitFor()
+    check(await page.getByRole('button',{name:'登录抖音',exact:true}).first().isVisible(), 'explicit expiry offers manual login')
     check(errors.length === 0, `no page errors: ${errors.join('; ')}`)
     console.log(
       `UI smoke passed: ${checks} interaction/layout checks; offline screenshots in .test-output/ui-*.png`

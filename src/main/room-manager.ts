@@ -34,11 +34,11 @@ export class RoomManager {
       room.fudaiService=new FudaiService(room.page,url,{
         onUpdate:(o,rounds,phase)=>{if(!this.rooms.has(room.id))return;room.drawAt=o?.drawAt||null;room.fudaiCount=rounds;room.phase=phase;room.status=phase==='完成任务'?'grabbing':'monitoring'},
         onResult:r=>this.result(room,r),onLog:m=>this.log(room.id,m),mayContinue:o=>this.continuation(o)
-      },{signal,now:Date.now,repository,policy,paymentReason,reportRisk,perform,assertActive,canFinish:t=>sessionEngine.canFinish(t),getConfig:()=>store.store},metadata.observer)
+      },{signal,now:Date.now,repository,policy,paymentReason,reportRisk,perform,assertActive,canFinish:t=>sessionEngine.canFinish(t),getConfig:()=>store.store},metadata.observer,!!page)
       room.fudaiService.seed(metadata.opportunity)
       await room.fudaiService.installDomObserver()
       if(!page)await this.browser.navigate(room.page,url,profile.visits.length===0,signal)
-      assertActive(signal,true);room.status='monitoring';this.update(room)
+      assertActive(signal,true);room.fudaiService.startMonitoring();room.status='monitoring';this.update(room)
       return room
     } catch(error){await this.removeRoom(room.id);throw error}
   }
@@ -46,7 +46,13 @@ export class RoomManager {
     for(const room of this.rooms.values()) {
       if(room.page?.isClosed()){await this.removeRoom(room.id);continue}
       await room.fudaiService?.tick()
-      if(room.fudaiService?.doneReason){this.log(room.id,room.fudaiService.doneReason);await this.removeRoom(room.id);continue}
+      if(room.fudaiService?.doneReason){
+        const reason=room.fudaiService.doneReason
+        const last=repository.account().decisions.at(-1)
+        if(last?.url!==room.url||last.action!=='skip'||last.reason!==reason)
+          repository.decision({url:room.url,action:'skip',reason,score:null,probability:null})
+        this.log(room.id,reason);await this.removeRoom(room.id);continue
+      }
       room.remainingSeconds=room.drawAt?Math.max(0,Math.ceil((room.drawAt-Date.now())/1000)):null
       room.countdownText=room.remainingSeconds===null?'':`${Math.floor(room.remainingSeconds/60)}:${String(room.remainingSeconds%60).padStart(2,'0')}`
       const profile=repository.account().rooms[room.url]

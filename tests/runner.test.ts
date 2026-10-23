@@ -124,8 +124,52 @@ function harness() {
   }
 }
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve))
+
+test('long idle restart rediscovers stale rooms without erasing room preferences or ledger', async () => {
+  const h = harness(), url = 'https://live.douyin.com/12345678'
+  h.repo.room(url, 'saved')
+  h.repo.visit(url, true)
+  h.repo.updateRoom(url, { favorite: true, allowPaid: true })
+  const before = structuredClone(h.repo.account().rooms[url])
+  h.advance(31 * 60000)
+  await h.runner.start()
+  await h.runner.pulse()
+  await flush()
+  assert.equal(h.counts().scanCount, 1)
+  assert.equal(h.counts().verifyCount, 0)
+  assert.deepEqual(h.repo.account().rooms[url], before)
+  assert.ok(h.logs.some(m => m.includes('超过30分钟')))
+  // A stale room returned by the current scan may still be verified.
+  h.advance(1000)
+  await h.runner.pulse()
+  await flush()
+  assert.equal(h.counts().verifyCount, 1)
+  await h.runner.stop()
+})
+
+test('short idle start retains recent history but later restart recalculates freshness', async () => {
+  const h = harness(), url = 'https://live.douyin.com/12345678'
+  h.repo.room(url, 'recent')
+  h.repo.visit(url, true)
+  h.advance(5 * 60000)
+  await h.runner.start()
+  await h.runner.pulse()
+  await flush()
+  assert.equal(h.counts().verifyCount, 1)
+  assert.equal(h.counts().scanCount, 0)
+  await h.runner.stop()
+  h.advance(31 * 60000)
+  await h.runner.start()
+  await h.runner.pulse()
+  await flush()
+  assert.equal(h.counts().scanCount, 1)
+  assert.equal(h.counts().verifyCount, 1)
+  await h.runner.stop()
+})
+
 test('source scanning interval never delays a queued verification or drifts during idle polling', async () => {
   const h = harness()
+  h.config.scanIntervalSeconds = 40
   await h.runner.start()
   await h.runner.pulse()
   await flush()
@@ -208,9 +252,9 @@ async function runFor(h: ReturnType<typeof harness>, ms: number) {
   }
 }
 
-test('free manual-participation bag with 64 seconds is taken over from the verification page', async () => {
+test('free manual-participation bag with 40 seconds is taken over from the verification page', async () => {
   const h = harness()
-  h.discovery.verifyRoom = async () => verified(h, 64)
+  h.discovery.verifyRoom = async () => verified(h, 40)
   await h.runner.start({ scanIntervalSeconds: 180 })
   await pulse(h)
   await pulse(h)
@@ -218,7 +262,7 @@ test('free manual-participation bag with 64 seconds is taken over from the verif
   assert.equal(h.runner.getState().candidateCount, 0)
   const d = h.repo.account().decisions.at(-1)!
   assert.equal(d.action, 'takeover')
-  assert.equal(d.snapshot!.leadSeconds, 28)
+  assert.equal(d.snapshot!.leadSeconds, 20)
   await h.runner.stop()
 })
 
@@ -235,13 +279,16 @@ test('near-draw unsupported task retains its real rejection reason instead of a 
 
 test('nine-minute candidate survives five minutes and revalidates on the retained page at its reservation', async () => {
   const h = harness()
+  // A long candidate stays queued until the configured task window.
+  h.config.policy.navigationMinSeconds = 45
+  h.config.policy.navigationMaxSeconds = 65
   h.config.candidatePoolLimit = 1
   let calls = 0,
     drawAt = 0
   h.discovery.verifyRoom = async () => {
     calls++
     if (calls === 1) drawAt = h.now() + 540000
-    else h.advance(25000)
+    else h.advance(5000)
     return verified(h, (drawAt - h.now()) / 1000, { drawAt })
   }
   await h.runner.start({ scanIntervalSeconds: 180 })
@@ -252,11 +299,97 @@ test('nine-minute candidate survives five minutes and revalidates on the retaine
   await runFor(h, 330000)
   assert.equal(h.runner.getState().candidateCount, 1)
   assert.equal(calls, 1)
-  await runFor(h, 72000)
+  await runFor(h, 121000)
   assert.equal(calls, 2)
   assert.equal(h.counts().entered, 1)
   assert.equal(h.runner.getState().candidateCount, 0)
   assert.equal(h.repo.account().decisions.at(-1)!.action, 'takeover')
+  await h.runner.stop()
+})
+
+test('reservation retains task time after a full 30-second load and 12-second revalidation', async () => {
+  const h = harness()
+  h.config.candidatePoolLimit = 1
+  let calls = 0, drawAt = 0
+  h.discovery.verifyRoom = async () => {
+    calls++
+    if (calls === 1) drawAt = h.now() + 540000
+    else h.advance(42000)
+    return verified(h, (drawAt - h.now()) / 1000, { drawAt, requiresComment:true, commentText:'测试', membership:'needs-payment', cost:1 })
+  }
+  await h.runner.start()
+  await pulse(h)
+  await pulse(h)
+  assert.equal(h.runner.getState().candidateCount, 1)
+  const lead = h.repo.account().decisions.at(-1)!.snapshot!.leadSeconds
+  assert.equal(lead,90)
+  await runFor(h, drawAt - h.now() - lead * 1000 + 1000)
+  assert.equal(calls, 2)
+  assert.equal(h.counts().entered, 1)
+  assert.ok(drawAt - h.now() >= 45000)
+  await h.runner.stop()
+})
+
+test('sequential discovery fills candidates while return navigation is reserved before the 45-second window',async()=>{
+  const h=harness(),firstUrl='https://live.douyin.com/12345678',secondUrl='https://live.douyin.com/87654321'
+  let drawAt=0
+  const calls:{url:string;at:number;reserved:boolean}[]=[]
+  h.discovery.scan=async()=>({rooms:[firstUrl,secondUrl].map(url=>({url,name:url,reason:'fixture',countdownText:'',remainingSeconds:null})),riskDetected:false,riskReason:''})
+  h.discovery.verifyRoom=async(room,options)=>{
+    calls.push({url:room.url,at:h.now(),reserved:!!options?.reserved})
+    h.repo.change(a=>a.navigations.push({url:room.url,at:h.now(),fresh:false}))
+    h.advance(3000)
+    if(room.url===secondUrl)return {room:null,riskDetected:false,riskReason:''}
+    if(!drawAt)drawAt=h.now()+420000
+    return verified(h,(drawAt-h.now())/1000,{drawAt})
+  }
+  await h.runner.start();await pulse(h);await pulse(h)
+  assert.equal(h.runner.getState().candidateCount,1)
+  h.advance(60000); h.env.sessionEngine.tick(false)
+  await pulse(h,60000)
+  assert.equal(calls[1].url,secondUrl,'queued rooms remain in discovery order')
+  // No new exploration may consume the return slot as the reservation approaches.
+  await pulse(h,10000)
+  const count=calls.length
+  await pulse(h,10000)
+  assert.equal(calls.length,count)
+  await runFor(h,drawAt-h.now()-90000)
+  assert.equal(calls.at(-1)!.url,firstUrl)
+  assert.equal(calls.at(-1)!.reserved,true)
+  assert.ok(calls.at(-1)!.at-calls[1].at>=120000)
+  assert.equal(h.counts().entered,1)
+  assert.ok(h.logs.some(m=>m.includes('等待候选预约')))
+  await h.runner.stop()
+})
+
+test('a verified room is reused if closing it would make a timely return impossible',async()=>{
+  const h=harness()
+  h.discovery.verifyRoom=async()=>{
+    h.repo.change(a=>a.navigations.push({url:'https://live.douyin.com/12345678',at:h.now()-3000,fresh:false}))
+    return verified(h,64)
+  }
+  await h.runner.start();await pulse(h);await pulse(h)
+  assert.equal(h.counts().entered,1)
+  assert.equal(h.runner.getState().candidateCount,0)
+  await h.runner.stop()
+})
+
+test('an occupied lottery room remains active beyond navigation spacing without scanning another room', async () => {
+  const h=harness()
+  h.config.enterBeforeSeconds=600
+  let occupied=false, verifications=0
+  h.rooms.getAllRooms=()=>occupied?[{} as Room]:[]
+  h.rooms.addRoomFromPage=async()=>{occupied=true;return {} as Room}
+  h.discovery.verifyRoom=async()=>{verifications++;return verified(h,400)}
+  await h.runner.start()
+  await pulse(h)
+  await pulse(h)
+  assert.equal(occupied,true)
+  const before=h.counts().scanCount
+  await runFor(h,240000)
+  assert.equal(occupied,true)
+  assert.equal(verifications,1)
+  assert.equal(h.counts().scanCount,before)
   await h.runner.stop()
 })
 
@@ -275,7 +408,7 @@ test('reserved candidate rechecks new share and paid requirements instead of usi
     await h.runner.start()
     await pulse(h)
     await pulse(h)
-    await runFor(h, 402000)
+    await runFor(h, 451000)
     assert.equal(calls, 2)
     assert.equal(h.counts().entered, 0)
     assert.equal(h.runner.getState().candidateCount, 0)
@@ -295,7 +428,7 @@ test('a changed lottery at reservation is rescheduled using its new countdown', 
   await h.runner.start()
   await pulse(h)
   await pulse(h)
-  await runFor(h, 402000)
+  await runFor(h, 451000)
   assert.equal(calls, 2)
   assert.equal(h.counts().entered, 0)
   assert.equal(h.runner.getState().candidateCount, 1)

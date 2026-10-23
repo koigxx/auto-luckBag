@@ -1,5 +1,22 @@
 import type { Policy } from '../shared/policy'
 
+export function isDiscoveryUrl(url: string): boolean {
+  try {
+    const value = new URL(url)
+    return value.hostname === 'live.douyin.com' && ['/', '/category', '/follow'].includes(value.pathname)
+  } catch { return false }
+}
+
+// Source scans keep their own pacing. Scanning must not reset the room-to-room
+// clock; the separate post-discovery delay is applied before creating a room page.
+export function navigationSpacingReadyAt(
+  navigations: {url: string; at: number}[], target: string, spacingMs: number, now: number
+): number {
+  const source = isDiscoveryUrl(target)
+  const last = navigations.filter(n => source || !isDiscoveryUrl(n.url)).at(-1)?.at
+  return last === undefined ? now : Math.max(now, last + spacingMs)
+}
+
 /** Earliest allowed navigation under the rolling hourly quotas; spacing stays in the gate. */
 export function navigationQuotaReadyAt(
   navigations: { at: number; fresh: boolean }[],

@@ -437,8 +437,8 @@ async function save() {
               <option value="prefer">
                 {{
                   tr(
-                    '优先复用已有资格，熟悉主播可在预算内付费',
-                    'Reuse eligibility first; known hosts may be paid within budget'
+                    '优先复用已有资格，首次发现也可在预算内付费',
+                    'Reuse eligibility first; first-time rooms may be paid within budget'
                   )
                 }}
               </option>
@@ -450,8 +450,8 @@ async function save() {
           <p class="microcopy">
             {{
               tr(
-                '优先复用需要至少两次发现记录或明确许可；主播许可在房间库中管理。',
-                'Reuse-first needs two successful observations or explicit permission. Manage permissions in the room library.'
+                '首次发现且时间、任务和支出限制满足即可付费参与，无需重复验证两次；仅许可策略仍需在房间库授权。',
+                'First-time rooms are eligible when time, tasks and spending limits permit. The permitted-hosts policy still requires room authorization.'
               )
             }}
           </p>
@@ -563,8 +563,8 @@ async function save() {
           <p class="section-description">
             {{
               tr(
-                '首页扫描间隔只控制重复扫描；已有房间队列按导航间隔逐个验证。候选返回时会复验，并为复验预留时间。',
-                'The rescan interval only controls source-page scans. Queued rooms use the navigation spacing; returning candidates reserve time for revalidation.'
+                '按顺序验证房间，证据齐全即可结束。任务准备窗口不含返房耗时：系统会另外预留加载30秒、复验12秒和调度3秒，更早开始返房；复杂任务可能需要更长准备时间。',
+                'Verify rooms in order. The task window excludes return preparation: allow another 30 seconds for loading, 12 for revalidation and 3 for scheduling. Complex tasks may need more time.'
               )
             }}
           </p>
@@ -578,7 +578,7 @@ async function save() {
                 min="30"
                 max="3600" /></label
             ><label class="field-label"
-              >{{ tr('提前进房下限（秒）', 'Minimum entry lead (seconds)')
+              >{{ tr('开奖前任务准备窗口（秒）', 'Task preparation window (seconds)')
               }}<input
                 id="setting-enterBeforeSeconds"
                 v-model.number="draft.enterBeforeSeconds"

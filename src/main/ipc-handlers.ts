@@ -8,19 +8,20 @@ import { store } from './store'
 import { setupAppMenu } from './app-menu'
 import { StatsService } from './stats-service'
 import { AutoRunner } from './auto-runner'
-import { currentBudget,policy,repository } from './runtime'
+import { currentBudget,policy,repository,setExecutionLogger } from './runtime'
 import { validateConfigPatch } from '../shared/config-validation'
 import { dayKey } from './runtime-repository'
 
 export function setupIpcHandlers(win:BrowserWindow,_browser:BrowserManager,auth:AuthService,rooms:RoomManager,discovery:DiscoveryService,stats:StatsService,runner:AutoRunner):void {
   const send=(channel:string,data:unknown)=>{if(!win.isDestroyed())win.webContents.send(channel,data)}
   const log=(roomId:string,message:string)=>send('log:add',{roomId,message,time:Date.now()})
+  setExecutionLogger(message=>log('auto',message))
   rooms.setCallbacks(r=>send('room:update',rooms.getRoomPublicInfo(r.id)),log,(_room,result)=>stats.recordParticipation(result),id=>send('room:removed',id))
   discovery.setLogger(m=>log('discover',m));stats.setOnUpdate(s=>send('run-stats:update',s));runner.setCallbacks(m=>log('auto',m),s=>send('auto-run:update',s))
   const safe=(fn:(...args:any[])=>unknown)=>async(_event:unknown,...args:any[])=>{try{return await fn(...args)}catch(e:any){return {success:false,error:e.message,state:runner.getState()}}}
   ipcMain.handle('auth:login',safe(async()=>{await runner.stop('登录切换');return {success:await auth.login(),isLoggedIn:auth.getLoginStatus()}}))
   ipcMain.handle('auth:logout',safe(async()=>{await runner.stop('退出账号');await auth.logout();return {success:true}}))
-  ipcMain.handle('auth:status',()=>({isLoggedIn:auth.getLoginStatus()}))
+  ipcMain.handle('auth:status',async(_event,force=false)=>{await auth.restoreSession(force===true);return auth.getStatus()})
   ipcMain.handle('room:add',safe(async(url:string,name?:string)=>{const room=await runner.manualRoom(url,name);return {success:true,room:rooms.getRoomPublicInfo(room.id)}}))
   ipcMain.handle('room:remove',safe(async(id:string)=>{await rooms.removeRoom(id);return {success:true}}))
   ipcMain.handle('room:list',()=>rooms.getAllRoomsPublicInfo())

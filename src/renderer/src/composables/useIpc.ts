@@ -1,9 +1,11 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import type { RoomInfo, AppConfig, LogEntry, Stats, RunStats, AutoRunState } from '../types'
 import type { Insights } from '../../../shared/insights'
+import type { AuthState } from '../../../shared/auth'
 
 export function useIpc() {
   const isLoggedIn = ref(false)
+  const authState = ref<AuthState>('checking')
   const ready = ref(false)
   const rooms = ref<RoomInfo[]>([])
   const config = ref<AppConfig | null>(null)
@@ -77,16 +79,18 @@ export function useIpc() {
     if (index < 0) rooms.value.push(room)
     else rooms.value[index] = room
   }
-  async function refreshAccount() {
+  async function refreshAccount(force = false) {
+    const statusRequest = window.api.auth.status(force)
     const [auth, currentConfig, currentRooms, currentStats, state] = await Promise.all([
-      window.api.auth.status(),
-      window.api.config.get(),
+      statusRequest,
+      window.api.config.get().then(value => { if(!disposed){config.value=value;ready.value=true} return value }),
       window.api.room.list(),
       window.api.runStats.get(),
       window.api.autoRun.status()
     ])
     if (disposed) return
     isLoggedIn.value = auth.isLoggedIn
+    authState.value = auth.state || (auth.isLoggedIn ? 'connected' : 'signed-out')
     config.value = currentConfig
     rooms.value = currentRooms
     runStats.value = currentStats
@@ -112,6 +116,13 @@ export function useIpc() {
       }),
       window.api.on('auto-run:update', (entry: AutoRunState) => {
         autoRunState.value = entry
+        if(entry.status === 'stopped' || entry.status === 'blocked') {
+          void window.api.auth.status().then(auth => {
+            if(disposed)return
+            isLoggedIn.value=auth.isLoggedIn
+            authState.value=auth.state || (auth.isLoggedIn ? 'connected' : 'signed-out')
+          }).catch(()=>{})
+        }
       })
     )
     await action('initialize', refreshAccount)
@@ -136,6 +147,12 @@ export function useIpc() {
       notify(tr('账号已连接，可以开始运行。', 'Account connected. You can start a run.'))
       return true
     })
+  const checkLogin = () => action('checkLogin', async () => {
+    authState.value='checking'
+    isLoggedIn.value=false
+    await refreshAccount(true)
+    return true
+  })
   const logout = () =>
     action('logout', async () => {
       requireSuccess(await window.api.auth.logout())
@@ -163,6 +180,7 @@ export function useIpc() {
   const startAutoRun = (options: { sourceUrl?: string; stopAfterMinutes?: number } = {}) =>
     action('start', async () => {
       const result = await window.api.autoRun.start(options)
+      await refreshAccount()
       autoRunState.value = result.state
       requireSuccess(result)
       notify(tr('运行已启动。', 'Run started.'))
@@ -197,6 +215,8 @@ export function useIpc() {
   return {
     ready,
     isLoggedIn,
+    authState,
+    checkLogin,
     rooms,
     config,
     logs,

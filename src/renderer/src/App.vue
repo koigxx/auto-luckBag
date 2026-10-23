@@ -13,6 +13,8 @@ import './styles.css'
 const {
   ready,
   isLoggedIn,
+  authState,
+  checkLogin,
   rooms,
   config,
   logs,
@@ -232,7 +234,9 @@ async function recordAction(
             @click="logoutOpen = true"
           >
             <UiIcon name="logout" :size="18" /></button
-          ><button v-else class="button small" :disabled="busy.login" @click="login">
+          ><button v-else-if="authState === 'checking' || authState === 'unknown'" class="button small" :disabled="authState === 'checking'" @click="checkLogin">
+            {{ authState === 'checking' ? tr('正在校验登录…', 'Checking sign-in…') : tr('暂时无法验证 · 重试', 'Unable to verify · Retry') }}
+          </button><button v-else class="button small" :disabled="busy.login" @click="login">
             {{ busy.login ? tr('等待登录…', 'Signing in…') : tr('登录抖音', 'Sign in') }}
           </button>
         </div>
@@ -277,6 +281,8 @@ async function recordAction(
         </div>
         <template v-else>
           <RunDashboard
+            :auth-state="authState"
+            @check-login="checkLogin"
             v-show="view === 'dashboard'"
             :config="config"
             :logged-in="isLoggedIn"

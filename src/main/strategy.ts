@@ -1,4 +1,4 @@
-import { Opportunity, Policy, RoomProfile, RoundRecord } from '../shared/policy'
+import { Opportunity, Policy, RoomProfile, RoundRecord, RETURN_PREPARATION_SECONDS } from '../shared/policy'
 
 export interface Evaluation {
   feasible: boolean
@@ -25,12 +25,12 @@ export function taskLead(
   return Math.ceil(
     Math.max(
       learned,
-      15 +
-        (o.requiresComment ? 15 : 0) +
-        (o.requiresFollow ? 8 : 0) +
-        (o.membership === 'needs-payment' ? 25 : 0) +
+      10 +
+        (o.requiresComment ? 8 : 0) +
+        (o.requiresFollow ? 5 : 0) +
+        (o.membership === 'needs-payment' ? 12 : 0) +
         (o.watchSeconds || 0)
-    ) + (alreadyOpen ? 5 : p.navigationMaxSeconds + 10)
+    ) + 5 + (alreadyOpen ? 0 : RETURN_PREPARATION_SECONDS)
   )
 }
 export function projectedParticipants(o: Opportunity, r?: RoomProfile): number | null {
@@ -123,15 +123,16 @@ export function conflicts(
   return a.startAt < b.endAt && b.startAt < a.endAt
 }
 /** Exhaustive interval scheduling is cheap for a pool of at most five. */
-export function bestSchedule<T extends { evaluation: Evaluation }>(items: T[], limit = 5): T[] {
+export function bestSchedule<T extends { evaluation: Evaluation }>(items: T[], limit = 5, navigationGapSeconds = 0): T[] {
   const values = items.slice(0, 6).filter((x) => x.evaluation.feasible)
   let best: T[] = [],
     bestScore = -Infinity
   for (let mask = 1; mask < 1 << values.length; mask++) {
-    const chosen = values.filter((_, i) => mask & (1 << i))
+    const chosen = values.filter((_, i) => mask & (1 << i)).sort((a,b) => a.evaluation.startAt-b.evaluation.startAt)
     if (
       chosen.length > limit ||
-      chosen.some((a, i) => chosen.slice(i + 1).some((b) => conflicts(a.evaluation, b.evaluation)))
+      chosen.some((a, i) => chosen.slice(i + 1).some((b) => conflicts(a.evaluation, b.evaluation))) ||
+      chosen.some((a,i) => i > 0 && a.evaluation.startAt - chosen[i-1].evaluation.startAt < navigationGapSeconds * 1000)
     )
       continue
     const score = chosen.reduce((s, x) => s + x.evaluation.utility, 0)

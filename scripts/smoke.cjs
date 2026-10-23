@@ -36,7 +36,11 @@ async function main() {
     await page.waitForFunction(() => !!window.api)
     const config = await page.evaluate(() => window.api.config.get())
     assert.equal(config.diamondUsed, 7)
-    assert.equal(config.policy.navigationMinSeconds, 45)
+    assert.equal(config.policy.navigationMinSeconds, 120)
+    assert.equal(config.policy.navigationMaxSeconds, 180)
+    assert.equal(config.policy.dailyMinutes, 460)
+    assert.equal(config.policy.maxRounds, 6)
+    assert.equal(config.candidatePoolLimit, 5)
     assert.equal((await page.evaluate(() => window.api.autoRun.status())).running, false)
     assert.equal((await page.evaluate(() => window.api.auth.status())).isLoggedIn, false)
     const backup = path.join(profile, 'config.json.before-runtime-v2.bak')
@@ -51,6 +55,43 @@ async function main() {
       .getByRole('navigation', { name: '主导航' })
       .getByRole('button', { name: '策略设置', exact: true })
       .click()
+    // Exercise the actual Vue draft and contextBridge, not just plain IPC arguments.
+    await page.getByLabel('实物福袋', { exact: true }).check()
+    await page.getByLabel('钻石福袋', { exact: true }).check()
+    await page.getByRole('button', { name: '支出与粉丝团', exact: true }).click()
+    await page.getByLabel('总钻石预算', { exact: true }).fill('50')
+    await page.getByLabel('每天支出上限（钻）', { exact: true }).fill('50')
+    await page.getByLabel('每位主播累计上限（钻）', { exact: true }).fill('5')
+    await page.getByRole('button', { name: '保存设置', exact: true }).click()
+    await page.waitForFunction(() =>
+      /已保存，下次运行生效|保存未成功|An object could not be cloned/.test(document.body.innerText)
+    )
+    assert.ok(
+      await page.getByText('已保存，下次运行生效', { exact: true }).isVisible(),
+      `Settings save failed: ${(await page.getByRole('alert').allTextContents()).join(' | ')}`
+    )
+    const saved = await page.evaluate(() => window.api.config.get())
+    const persisted = JSON.parse(fs.readFileSync(path.join(profile, 'config.json'), 'utf8'))
+    for (const value of [saved, persisted]) {
+      assert.equal(value.diamondBudget, 50)
+      assert.equal(value.policy.dailySpend, 50)
+      assert.equal(value.policy.anchorSpend, 5)
+      assert.deepEqual(value.fudaiTypes, { all: false, physical: true, diamond: true })
+      assert.equal(value.diamondUsed, 7)
+    }
+    await page.reload()
+    await page
+      .getByRole('navigation', { name: '主导航' })
+      .getByRole('button', { name: '策略设置', exact: true })
+      .click()
+    assert.equal(await page.getByLabel('全部类型', { exact: true }).isChecked(), false)
+    assert.equal(await page.getByLabel('实物福袋', { exact: true }).isChecked(), true)
+    assert.equal(await page.getByLabel('钻石福袋', { exact: true }).isChecked(), true)
+    await page.getByRole('button', { name: '支出与粉丝团', exact: true }).click()
+    assert.equal(await page.getByLabel('总钻石预算', { exact: true }).inputValue(), '50')
+    assert.equal(await page.getByLabel('每天支出上限（钻）', { exact: true }).inputValue(), '50')
+    assert.equal(await page.getByLabel('每位主播累计上限（钻）', { exact: true }).inputValue(), '5')
+    assert.equal(await page.getByRole('button', { name: '保存设置', exact: true }).isDisabled(), true)
     assert.equal((await page.evaluate(() => window.api.config.set({ diamondUsed: 0 }))).success, false)
     assert.equal(
       (await page.evaluate(() => window.api.config.set({ policy: { sessionMin: 100, sessionMax: 10 } })))
@@ -65,7 +106,7 @@ async function main() {
     assert.deepEqual(errors, [])
     await require('./ui-smoke.cjs')(config, output)
     console.log(
-      'Electron smoke passed: isolated profile, legacy backup/restore, IPC validation, stopped-on-start, Vue render.'
+      'Electron smoke passed: isolated profile, legacy backup/restore, settings form save/reload/persistence, IPC validation, stopped-on-start, Vue render.'
     )
     console.log('Screenshots: .test-output/ui-*.png')
   } finally {

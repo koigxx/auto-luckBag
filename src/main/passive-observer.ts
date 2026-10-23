@@ -1,10 +1,11 @@
-import { Page, Response, WebSocket } from 'playwright'
+import { Page, Request, Response, WebSocket } from 'playwright'
 import { Opportunity } from '../shared/policy'
-import { parseLottery, riskFromText } from './lottery-parser'
+import { parseLottery, parseLotteryPayload, panelIdentity, riskFromText } from './lottery-parser'
 
 export class PassiveObserver {
   latest: Opportunity | null = null
   panelLotteryId: string | null = null
+  panelIdentityReason = '尚未观察到弹窗身份响应'
   lastChatSuccess = 0
   lastFanSuccess = 0
   lastFanFailure = 0
@@ -12,8 +13,22 @@ export class PassiveObserver {
   private alive = true
   private frames = new Map<WebSocket, (event: {payload: string | Buffer}) => void>()
   private newestRequestAt=0
+  private newestPanelRequestAt=0
+  // Endpoint paths and processing stages only: never retain query strings,
+  // headers, request bodies, response payloads or account credentials here.
+  private observations = new Map<string, string>()
+  private note(path: string, state: string): void {
+    const key = path.replace(/\d{6,}/g, ':id').slice(0, 160)
+    this.observations.delete(key)
+    this.observations.set(key, state)
+    if (this.observations.size > 8) this.observations.delete(this.observations.keys().next().value!)
+  }
+  identityDiagnostics(): string {
+    return [...this.observations].map(([path, state]) => `${path}: ${state}`).join('；') || '未记录到福袋请求响应'
+  }
   constructor(private page: Page, private signal: AbortSignal, private reportRisk:(reason:string,source:string)=>void, private onOpportunity: (o: Opportunity) => void = () => {}) {
     page.on('response', this.response)
+    page.on('requestfailed', this.requestFailed)
     page.on('websocket', this.websocket)
     signal.addEventListener('abort', this.close, {once:true})
     page.once('close', this.close)
@@ -25,32 +40,102 @@ export class PassiveObserver {
     this.latest = o
     this.onOpportunity(o)
   }
-  private response = (response: Response): void => { void this.readResponse(response).catch(() => {}) }
+  private requestFailed = (request: Request): void => {
+    if (!this.alive || this.signal.aborted) return
+    const url = new URL(request.url())
+    if ((url.hostname === 'douyin.com' || url.hostname.endsWith('.douyin.com')) && /\/lottery\//.test(url.pathname))
+      this.note(url.pathname, '请求失败，未收到完整响应')
+  }
+  private response = (response: Response): void => {
+    void this.readResponse(response).catch(() => {
+      if (!this.alive || this.signal.aborted) return
+      const url = new URL(response.url())
+      if ((url.hostname === 'douyin.com' || url.hostname.endsWith('.douyin.com')) && /\/lottery\//.test(url.pathname))
+        this.note(url.pathname, '响应处理异常')
+    })
+  }
   private async readResponse(response: Response): Promise<void> {
     if (!this.alive || this.signal.aborted) return
     const url = new URL(response.url())
-    if (!(url.hostname === 'douyin.com' || url.hostname.endsWith('.douyin.com')) || !url.pathname.startsWith('/webcast/')) return
-    if(response.status()===429){this.reportRisk('服务返回请求限流','response');return}
-    const text = await response.text().catch(() => '')
-    if (!this.alive || this.signal.aborted || text.length > 2_000_000) return
-    let json:any; try { json=JSON.parse(text) } catch { return }
+    if (!(url.hostname === 'douyin.com' || url.hostname.endsWith('.douyin.com'))) return
+    const lotteryPath = /\/lottery\//.test(url.pathname)
+    if (!url.pathname.startsWith('/webcast/')) {
+      if (lotteryPath) this.note(url.pathname, '路径不在已支持范围内')
+      return
+    }
+    // Both paths are naturally observed user-rights responses. Ordinary
+    // /melon/lottery_info/ updates still cannot establish panel identity.
+    const isRight = /^\/webcast\/lottery\/(?:right|melon\/check_user_right)\/?$/.test(url.pathname)
+    const started = response.request().timing().startTime
+    // Cached/unfinished timing may be unavailable (-1). It must not make every
+    // rights response silently fail the initial >= 0 ordering check.
+    const requestAt = Number.isFinite(started) && started >= 0 ? started : Date.now()
+    // Invalidate a newer unusable response too, so an older panel cannot authorize actions.
+    if (isRight && requestAt >= this.newestPanelRequestAt) {
+      this.newestPanelRequestAt = requestAt
+      this.panelLotteryId = null
+      this.panelIdentityReason = '已收到弹窗响应，正在读取内容'
+    }
+    if (lotteryPath) this.note(url.pathname, `HTTP ${response.status()}，正在读取内容`)
+    const failed = (reason: string): void => {
+      if (lotteryPath) this.note(url.pathname, reason)
+      if (isRight && requestAt === this.newestPanelRequestAt) this.panelIdentityReason = reason
+    }
+    if(response.status()===429){failed('HTTP 429，请求限流');this.reportRisk('服务返回请求限流','response');return}
+    let text: string
+    try { text = await response.text() } catch { failed('响应内容读取失败'); return }
+    if (!this.alive || this.signal.aborted) return
+    if (text.length > 2_000_000) { failed('响应内容超过大小限制'); return }
+    let json:any; try { json=parseLotteryPayload(text) } catch { failed('响应不是有效的 JSON'); return }
+    if (!json || typeof json !== 'object') { failed('响应缺少对象结构'); return }
     const code = Number(json.status_code)
+    const success = json.status_code === 0 || json.status_code === '0'
     const error = riskFromText(String(json.status_msg || json.message || json.prompt || ''))
     if (code === 95152 || (code !== 0 && error)) { this.reportRisk(error || `服务返回限制代码 ${code}`, 'response'); return }
     if (/\/gift\/send\//.test(url.pathname)) {
       const post=response.request().postData()||'', started=response.request().timing().startTime
       if (/(?:^|&)gift_id=6937(?:&|$)/.test(post) && Date.now()-started<20000) {
-        if(json.status_code!==undefined&&code===0)this.lastFanSuccess=started
-        else if(json.status_code!==undefined)this.lastFanFailure=started
+        if(response.ok() && success)this.lastFanSuccess=started
+        else if(json.status_code !== null && json.status_code !== '' && Number.isFinite(code) && code !== 0)this.lastFanFailure=started
       }
     }
-    if (/\/room\/chat\//.test(url.pathname) && json.status_code!==undefined && code===0) this.lastChatSuccess=response.request().timing().startTime
+    // Receipt freshness needs the actual request time; observation-time fallback
+    // is only for identity ordering and must not confirm an earlier comment.
+    if (/\/room\/chat\//.test(url.pathname) && response.ok() && success && Number.isFinite(started) && started > 0)
+      this.lastChatSuccess=started
     if (/\/lottery\//.test(url.pathname) || text.includes('"lottery_info"')) {
-      const o=parseLottery(text)
-      const requestAt=response.request().timing().startTime
-      if(o&&requestAt>=this.newestRequestAt){
+      let o=parseLottery(text)
+      // Rights establish panel identity independently of general lottery updates.
+      // A newer info response may finish first; do not discard a valid rights
+      // response for that reason or let its older task data replace the latest.
+      if (isRight && requestAt >= this.newestPanelRequestAt) {
+        this.newestPanelRequestAt = requestAt
+        const identity = response.ok()
+          ? panelIdentity(json, url, response.request().postData?.() || '')
+          : { id: null, reason: '弹窗请求返回 HTTP 错误' }
+        this.panelLotteryId = identity.id
+        this.panelIdentityReason = identity.reason
+        this.note(url.pathname, identity.reason)
+        // Some rights payloads omit the ID in lottery_info but include it in the
+        // request or envelope. Use it only after checking all identities agree.
+        if (o && identity.id && !o.lotteryId) o = { ...o, lotteryId: identity.id }
+      }
+      if (lotteryPath && !isRight) this.note(url.pathname, o?.lotteryId
+        ? '已识别福袋数据，非已支持的弹窗身份接口'
+        : '未识别到福袋身份结构')
+      if(o?.lotteryId && requestAt>=this.newestRequestAt){
         this.newestRequestAt=requestAt
-        if(/\/lottery\/right\//.test(url.pathname))this.panelLotteryId=o.lotteryId||null
+        const previous = this.latest
+        if (previous?.lotteryId === o.lotteryId) {
+          if (!o.drawAt) o = { ...o, drawAt: previous.drawAt, confidence: previous.confidence, source: previous.source }
+          if (!o.tasksKnown && previous.tasksKnown) o = { ...o,
+            tasksKnown: true, cost: previous.cost, membership: previous.membership,
+            requiresFollow: previous.requiresFollow, requiresComment: previous.requiresComment,
+            requiresShare: previous.requiresShare, commentText: previous.commentText,
+            watchSeconds: previous.watchSeconds, unsupported: [...previous.unsupported],
+            fanLevelRequired: previous.fanLevelRequired
+          }
+        }
         this.accept(o)
       }
     }
@@ -76,7 +161,7 @@ export class PassiveObserver {
   }
   close = (): void => {
     this.alive=false
-    this.page.off('response',this.response);this.page.off('websocket',this.websocket);this.page.off('close',this.close)
+    this.page.off('response',this.response);this.page.off('requestfailed',this.requestFailed);this.page.off('websocket',this.websocket);this.page.off('close',this.close)
     this.signal.removeEventListener('abort',this.close)
     for(const [ws,handler] of this.frames)ws.off('framereceived',handler)
     this.frames.clear()

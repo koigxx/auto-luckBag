@@ -10,7 +10,9 @@ export function validateConfigPatch(input:unknown):Partial<AppConfig> {
     else if(key==='language') {if(!['zh-CN','en-US'].includes(String(value)))throw new Error('无效语言');patch.language=value as AppConfig['language']}
     else if(key==='fudaiTypes') {
       if(!value||typeof value!=='object'||Object.keys(value).some(k=>!['all','physical','diamond'].includes(k))||['all','physical','diamond'].some(k=>typeof(value as any)[k]!=='boolean'))throw new Error('无效福袋类型')
-      patch.fudaiTypes=value as AppConfig['fudaiTypes']
+      const types = value as AppConfig['fudaiTypes']
+      // Vue drafts contain nested Proxies; only plain data can cross Electron IPC.
+      patch.fudaiTypes = { all: types.all, physical: types.physical, diamond: types.diamond }
     } else if(['allowDiamondProfit','debugLogs'].includes(key)){if(typeof value!=='boolean')throw new Error('无效开关');(patch as any)[key]=value}
     else {
       const [min,max]=key==='diamondBudget'?[0,100000]:key==='candidatePoolLimit'?[1,5]:key==='enterBeforeSeconds'?[30,600]:[30,3600]

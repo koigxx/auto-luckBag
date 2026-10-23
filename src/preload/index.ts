@@ -12,7 +12,7 @@ const api = {
   auth: {
     login: () => ipcRenderer.invoke('auth:login'),
     logout: () => ipcRenderer.invoke('auth:logout'),
-    status: () => ipcRenderer.invoke('auth:status')
+    status: (force = false) => ipcRenderer.invoke('auth:status', force)
   },
   // 房间管理
   room: {

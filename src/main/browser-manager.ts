@@ -1,7 +1,8 @@
-import { chromium, Browser, BrowserContext, Page } from 'playwright'
+import { chromium, Browser, BrowserContext, Page, BrowserContextOptions } from 'playwright'
 import fs from 'fs'
 import { execution, assertActive, perform, onHalt } from './runtime'
 import { checkSignal } from './execution-gate'
+import { ROOM_NAVIGATION_TIMEOUT_SECONDS } from '../shared/policy'
 
 export class BrowserManager {
   private browser: Browser | null = null
@@ -11,6 +12,15 @@ export class BrowserManager {
   private pages = new Set<Page>()
   constructor() { onHalt(() => this.closeManagedPages()) }
   setStorageStatePath(path: string): void { this.storageStatePath = path }
+  getExistingContext(): BrowserContext | null { return this.context }
+  async createBackgroundContext(storageState: BrowserContextOptions['storageState']): Promise<{context: BrowserContext; close: () => Promise<void>}> {
+    const browser = await chromium.launch({ headless: true,
+      ...(fs.existsSync(chromium.executablePath()) ? {} : {channel: 'msedge'}) })
+    try {
+      const context = await browser.newContext({ storageState, locale: 'zh-CN', viewport: {width:1440,height:900} })
+      return { context, close: () => browser.close() }
+    } catch (error) { await browser.close(); throw error }
+  }
   async getBrowser(): Promise<Browser> {
     if (!this.browser?.isConnected()) this.browser = await chromium.launch({ headless: false,
       ...(fs.existsSync(chromium.executablePath())?{}:{channel:'msedge'}), args: ['--window-size=1440,900'] })
@@ -38,7 +48,7 @@ export class BrowserManager {
     return page
   }
   async navigate(page: Page, url: string, fresh: boolean, signal: AbortSignal): Promise<void> {
-    await perform(signal, () => page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }), { url, fresh })
+    await perform(signal, () => page.goto(url, { waitUntil: 'domcontentloaded', timeout: ROOM_NAVIGATION_TIMEOUT_SECONDS * 1000 }), { url, fresh })
   }
   async closeManagedPages(): Promise<void> { await Promise.allSettled([...this.pages].map(p => p.close())); this.pages.clear() }
   async closeContext(): Promise<void> {

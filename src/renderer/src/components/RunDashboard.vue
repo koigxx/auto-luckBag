@@ -6,6 +6,7 @@ import UiIcon from './UiIcon.vue'
 const props = defineProps<{
   config: AppConfig
   loggedIn: boolean
+  authState?: import('../../../shared/auth').AuthState
   state: AutoRunState | null
   rooms: RoomInfo[]
   stats: Stats | null
@@ -18,6 +19,7 @@ const emit = defineEmits<{
   start: [options: { sourceUrl?: string; stopAfterMinutes?: number }]
   stop: []
   login: []
+  checkLogin: []
   settings: []
   records: []
   add: []
@@ -41,7 +43,10 @@ const labels = computed(() => ({
 }))
 const status = computed(() => labels.value[phase.value as keyof typeof labels.value] || phase.value)
 const title = computed(() =>
-  !props.loggedIn
+  props.authState === 'checking' ? tr('正在后台校验登录', 'Verifying your saved session')
+    : props.authState === 'unknown' ? tr('暂时无法验证登录状态', 'Unable to verify your session')
+    : props.authState === 'expired' ? tr('登录已失效，请重新登录', 'Session expired. Please sign in')
+    : !props.loggedIn
     ? tr('先连接你的抖音账号', 'Connect your Douyin account')
     : held.value
       ? tr('处理待办后，再继续', 'Review before continuing')
@@ -50,7 +55,9 @@ const title = computed(() =>
         : tr('准备好，开始下一轮', 'Ready for your next session')
 )
 const description = computed(() =>
-  !props.loggedIn
+  props.authState === 'checking' ? tr('正在复用保存的会话，不会打开登录窗口。', 'Checking your saved session without opening a login window.')
+    : props.authState === 'unknown' ? tr('已保留原登录信息。网络异常或页面未返回明确结果，请稍后重试。', 'Your session is retained. Check your connection and retry.')
+    : !props.loggedIn
     ? tr(
         '完成登录后，按已保存的策略自动发现和参与福袋。',
         'Sign in to discover and join lucky bags with your saved strategy.'
@@ -150,7 +157,10 @@ function start() {
           </div>
         </div>
         <div class="stage-actions">
-          <button v-if="!loggedIn" class="button primary large" :disabled="busy.login" @click="emit('login')">
+          <button v-if="authState === 'checking' || authState === 'unknown'" class="button primary large" :disabled="authState === 'checking'" @click="emit('checkLogin')">
+            {{ authState === 'checking' ? tr('校验中…', 'Checking…') : tr('重新校验', 'Retry verification') }}
+          </button>
+          <button v-else-if="!loggedIn" class="button primary large" :disabled="busy.login" @click="emit('login')">
             <UiIcon name="user" />{{
               busy.login ? tr('等待完成登录…', 'Waiting for sign-in…') : tr('登录抖音', 'Sign in to Douyin')
             }}

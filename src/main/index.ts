@@ -142,6 +142,7 @@ app.on('before-quit', async (event) => {
   await autoRunner.stop('应用退出')
   await roomManager.closeAllRooms()
   await discoveryService.close()
+  await authService.saveSession().catch(() => logInfo('auth', 'session save failed; retaining previous login file'))
   await browserManager.close()
   logInfo('app', 'cleanup done')
   cleanupComplete = true

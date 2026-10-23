@@ -9,7 +9,7 @@ export interface API {
   auth: {
     login: () => Promise<{ success: boolean; isLoggedIn?: boolean; error?: string }>
     logout: () => Promise<{ success: boolean; error?: string }>
-    status: () => Promise<{ isLoggedIn: boolean }>
+    status: (force?: boolean) => Promise<import('../../../shared/auth').AuthStatus>
   }
   room: {
     add: (

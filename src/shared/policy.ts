@@ -29,13 +29,20 @@ export interface Policy {
 
 export const DEFAULT_POLICY: Policy = {
   objective: 'opportunity', membership: 'prefer', sessionMin: 25, sessionMax: 40,
-  breakMin: 10, breakMax: 20, dailyMinutes: 120, dailySpend: 5, anchorSpend: 2,
-  paymentLimit: 1, dailyNewClubs: 2, reinvestRatio: 1, reinvestCap: 10,
-  explorationRatio: 0.2, newRoomsPerHour: 8, navigationsPerHour: 20, actionsPerMinute: 20,
-  navigationMinSeconds: 45, navigationMaxSeconds: 65, maxRounds: 3,
+  breakMin: 10, breakMax: 20, dailyMinutes: 460, dailySpend: 50, anchorSpend: 5,
+  paymentLimit: 1, dailyNewClubs: 50, reinvestRatio: 1, reinvestCap: 10,
+  explorationRatio: 0.6, newRoomsPerHour: 30, navigationsPerHour: 40, actionsPerMinute: 20,
+  navigationMinSeconds: 90, navigationMaxSeconds: 120, maxRounds: 6,
   maxStayMinutes: 20, nextRoundWaitSeconds: 60,
   allowedStart: '00:00', allowedEnd: '00:00', timezone: 'Asia/Shanghai', autoResume: true
 }
+
+export const SOURCE_TO_FIRST_ROOM_SECONDS = 20
+export const VERIFICATION_MAX_SECONDS = 28
+export const RETURN_VERIFICATION_MAX_SECONDS = 12
+export const ROOM_NAVIGATION_TIMEOUT_SECONDS = 30
+export const RETURN_SCHEDULING_MARGIN_SECONDS = 3
+export const RETURN_PREPARATION_SECONDS = ROOM_NAVIGATION_TIMEOUT_SECONDS + RETURN_VERIFICATION_MAX_SECONDS + RETURN_SCHEDULING_MARGIN_SECONDS
 
 export function validatePolicy(input: unknown): Policy {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Invalid policy')
@@ -78,6 +85,8 @@ export interface Opportunity {
   unsupported: string[]
   tasksKnown: boolean
   memberKnown?: boolean | null
+  /** Highest explicit fan level in the current conditions; null means unparsed. */
+  fanLevelRequired?: number | null
 }
 export interface RoomProfile {
   url: string
@@ -106,11 +115,15 @@ export interface RoundRecord {
   confirmedAt: number | null
   result: 'pending' | 'won' | 'lost' | 'unknown' | 'cancelled'
   prizeType: 'physical' | 'diamond' | 'coupon' | 'unknown' | null
-  diamondAmount: number
+  diamondAmount: number | null
+  prizeName?: string | null
+  prizeQuantity?: number | null
+  prizeUnit?: string | null
   updatedAt: number
   taskSeconds: number | null
   claimDueAt: number | null
   claimed: boolean
+  actions?: Partial<Record<'comment' | 'follow', { at: number; command?: string }>>
 }
 export interface Payment {
   id: string
@@ -163,3 +176,5 @@ export function normalizeRoomUrl(value: string): string {
   if (!['https:', 'http:'].includes(url.protocol) || url.hostname !== 'live.douyin.com' || key.length !== 1 || !/^[A-Za-z0-9_-]{5,}$/.test(key[0]) || /^[a-z_]+$/i.test(key[0]) || /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(key[0])) throw new Error('请输入有效的抖音直播间地址')
   return `https://live.douyin.com/${key[0]}`
 }
+// Startup discovery freshness, not a platform safety threshold.
+export const HISTORY_STARTUP_FRESHNESS_MS = 30 * 60 * 1000

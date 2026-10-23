@@ -86,23 +86,35 @@ export class RuntimeRepository {
     }
   }
   roundKey(url: string, lotteryId: string): string { return `${url}#${lotteryId}` }
+  claimAction(url: string, lotteryId: string, kind: 'comment' | 'follow', command?: string): void {
+    const actions = this.account().rounds[this.roundKey(url, lotteryId)]?.actions || {}
+    if (actions[kind]) throw new Error('本轮该任务已尝试，禁止重复执行')
+    // Persist synchronously before dispatch; an ambiguous crash must not cause replay.
+    this.record(url, lotteryId, { actions: { ...actions, [kind]: { at: this.now(), ...(command ? { command } : {}) } } })
+  }
   record(url: string, lotteryId: string, patch: Partial<RoundRecord>): RoundRecord {
     if (!lotteryId) throw new Error('缺少福袋身份，不能确认参与或奖励')
     const key = this.roundKey(url, lotteryId), now = this.now()
     return this.change(a => {
       const r = a.rounds[key] ||= { key, lotteryId, roomUrl: url, createdAt: now, drawAt: null, submittedAt: null,
-        confirmedAt: null, result: 'pending', prizeType: null, diamondAmount: 0, updatedAt: now,
+        confirmedAt: null, result: 'pending', prizeType: null, diamondAmount: null, prizeName: null, prizeQuantity: null, prizeUnit: null, updatedAt: now,
         taskSeconds: null, claimDueAt: null, claimed: false }
       const confirmedAt = r.confirmedAt
       const previousResult = r.result
       const amount = r.diamondAmount
       const previousType = r.prizeType
       const taskSeconds = r.taskSeconds
+      const previousName = r.prizeName, previousQuantity = r.prizeQuantity, previousUnit = r.prizeUnit
       Object.assign(r, patch, { key, lotteryId, roomUrl: url, createdAt: r.createdAt, updatedAt: now })
       if (confirmedAt !== null) { r.confirmedAt = confirmedAt; r.taskSeconds = taskSeconds }
       if (previousResult === 'won' && patch.result !== 'won') r.result = 'won'
       if (previousResult === 'won' && previousType !== 'unknown' && previousType !== null && (r.prizeType === 'unknown' || r.prizeType === null)) r.prizeType=previousType
-      r.diamondAmount = Math.max(amount, Math.max(0, Math.floor(Number(patch.diamondAmount) || 0)))
+      const nextAmount = typeof patch.diamondAmount === 'number' && Number.isFinite(patch.diamondAmount) && patch.diamondAmount >= 0
+        ? Math.floor(patch.diamondAmount) : null
+      r.diamondAmount = amount == null ? nextAmount : nextAmount == null ? amount : Math.max(amount, nextAmount)
+      r.prizeName = previousName || patch.prizeName || null
+      r.prizeQuantity = previousQuantity ?? patch.prizeQuantity ?? null
+      r.prizeUnit = previousUnit || patch.prizeUnit || null
       return r
     })
   }
@@ -111,7 +123,7 @@ export class RuntimeRepository {
     const entries = Object.values(a.payments).filter(x => x.state !== 'failed')
     const spent = a.openingSpent + entries.filter(x => x.state === 'confirmed').reduce((s,x) => s+x.cost,0)
     const reserved = entries.filter(x => x.state !== 'confirmed').reduce((s,x) => s+x.cost,0)
-    const awards = Object.values(a.rounds).filter(r => r.result === 'won' && r.prizeType === 'diamond' && r.confirmedAt).reduce((s,r) => s+r.diamondAmount,0)
+    const awards = Object.values(a.rounds).filter(r => r.result === 'won' && r.prizeType === 'diamond' && r.confirmedAt).reduce((s,r) => s+(r.diamondAmount ?? 0),0)
     const credit = allowProfit ? Math.min(p.reinvestCap, Math.floor(awards * p.reinvestRatio)) : 0
     const daily = entries.filter(x => x.state!=='confirmed'||dayKey(x.confirmedAt??x.at,p.timezone) === today).reduce((s,x)=>s+x.cost,0)
     return { spent, reserved, awards, credit, effective: base + credit, remaining: Math.max(0, base+credit-spent-reserved), dailyRemaining: Math.max(0,p.dailySpend-daily) }
@@ -123,7 +135,6 @@ export class RuntimeRepository {
     if (p.membership === 'existing') return '仅使用已有资格'
     if (!room || room.blocked) return '房间未知或已屏蔽'
     if (p.membership === 'whitelist' && !room.allowPaid) return '主播未获付费许可'
-    if (p.membership === 'prefer' && !room.allowPaid && room.visits.filter(v=>v.found).length < 2) return '房间证据不足，暂不开新团'
     if (cost > p.paymentLimit || cost > b.remaining || cost > b.dailyRemaining) return '钻石预算不足或超过单次额度'
     const entries=Object.values(a.payments).filter(x=>x.state!=='failed')
     if (entries.filter(x=>x.roomUrl===url).reduce((s,x)=>s+x.cost,0)+cost>p.anchorSpend) return '主播支出达到上限'
@@ -164,7 +175,7 @@ export class RuntimeRepository {
     const confirmed=records.filter(r=>r.confirmedAt)
     return { participated:confirmed.length, physicalWins:confirmed.filter(r=>r.result==='won'&&r.prizeType==='physical').length,
       diamondWins:confirmed.filter(r=>r.result==='won'&&r.prizeType==='diamond').length,
-      diamondWonAmount:confirmed.filter(r=>r.result==='won'&&r.prizeType==='diamond').reduce((s,r)=>s+r.diamondAmount,0),
+      diamondWonAmount:confirmed.filter(r=>r.result==='won'&&r.prizeType==='diamond').reduce((s,r)=>s+(r.diamondAmount ?? 0),0),
       couponWins:confirmed.filter(r=>r.result==='won'&&r.prizeType==='coupon').length,
       submittedUnknown:records.filter(r=>r.submittedAt&&!r.confirmedAt).length,
       unknownResults:confirmed.filter(r=>r.result==='unknown').length,

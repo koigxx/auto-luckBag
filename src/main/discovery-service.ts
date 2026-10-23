@@ -1,6 +1,6 @@
 import { Page, Response } from 'playwright'
 import { BrowserManager } from './browser-manager'
-import { Opportunity, normalizeRoomUrl } from '../shared/policy'
+import { Opportunity, normalizeRoomUrl, SOURCE_TO_FIRST_ROOM_SECONDS, VERIFICATION_MAX_SECONDS, RETURN_VERIFICATION_MAX_SECONDS } from '../shared/policy'
 import { PassiveObserver } from './passive-observer'
 import { LotteryDom, visibleOpportunity } from './lottery-dom'
 import { execution, repository, assertActive, onHalt, perform, reportRisk } from './runtime'
@@ -43,9 +43,11 @@ export interface ScanResult {
 export interface VerifyRoomOptions {
   keepPageOnVerified?: boolean
   minDwellMs?: number
+  reserved?: boolean
 }
 export class DiscoveryService {
   private pages = new Set<Page>()
+  private firstVerificationAt = 0
   private onLog: (text: string) => void = () => {}
   constructor(private browser: BrowserManager) {
     onHalt(() => this.close())
@@ -105,7 +107,9 @@ export class DiscoveryService {
       for (const link of links) collect(link.url, link.name)
       const found = [...rooms.values()].slice(0, Math.min(50, Math.max(1, options.maxRooms || 20)))
       for (const room of found) repository.room(room.url, room.name, 'discovery')
+      this.firstVerificationAt = Date.now() + SOURCE_TO_FIRST_ROOM_SECONDS * 1000
       this.onLog(`入口发现 ${found.length} 个房间，等待逐个验证`)
+      if (found.length) this.onLog(`首页发现后等待 ${SOURCE_TO_FIRST_ROOM_SECONDS} 秒再验证首房；后续房间按导航间隔执行`)
       return { rooms: found, riskDetected: false, riskReason: '' }
     } finally {
       page.off('response', response)
@@ -118,6 +122,9 @@ export class DiscoveryService {
     const url = normalizeRoomUrl(room.url),
       signal = execution.signal
     assertActive(signal, true)
+    if (this.firstVerificationAt > Date.now()) await delay(this.firstVerificationAt - Date.now(), signal)
+    assertActive(signal, true)
+    this.firstVerificationAt = 0
     const profile = repository.room(url, room.name),
       fresh = profile.visits.length === 0
     const page = await this.browser.newManagedPage(signal)
@@ -140,7 +147,7 @@ export class DiscoveryService {
       }
       this.onLog(`验证 ${room.name || url}`)
       const started = Date.now(),
-        dwell = Math.max(options.minDwellMs || 0, 22000 + Math.random() * 6000)
+        dwell = Math.max(options.minDwellMs || 0, (options.reserved ? RETURN_VERIFICATION_MAX_SECONDS : VERIFICATION_MAX_SECONDS) * 1000)
       let opened = false,
         visible: Opportunity | null = null
       while (Date.now() - started < dwell) {
@@ -152,7 +159,14 @@ export class DiscoveryService {
         if (entry.visible && !opened) {
           opened = await dom.open()
         }
-        await delay(2500, signal)
+        // Evidence, not a mandatory dwell, decides readiness. Return visits have
+        // a smaller observation ceiling, but never bypass identity/task checks.
+        const latest = observer.latest
+        if (Date.now() - started >= Math.max(3000, options.minDwellMs || 0) &&
+            latest?.lotteryId && latest.drawAt && latest.tasksKnown &&
+            latest.source === 'network' && latest.confidence === 'exact' &&
+            observer.panelLotteryId === latest.lotteryId && await dom.panelText()) break
+        await delay(500, signal)
       }
       assertActive(signal, true)
       let opportunity = observer.latest || visible
@@ -163,7 +177,8 @@ export class DiscoveryService {
           source: 'visible-dom',
           confidence: 'estimated'
         }
-      if (opportunity) opportunity = supplementVisibleTask(opportunity, await dom.panelText())
+      if (opportunity) opportunity = supplementVisibleTask(opportunity, await dom.panelText(),
+        !!opportunity.lotteryId && observer.panelLotteryId === opportunity.lotteryId)
       if (opportunity) observer.accept(opportunity)
       const found = !!opportunity?.drawAt
       repository.visit(url, found, opportunity || undefined)
@@ -211,6 +226,7 @@ export class DiscoveryService {
     }
   }
   async close(): Promise<void> {
+    this.firstVerificationAt = 0
     await Promise.allSettled([...this.pages].map((p) => p.close()))
     this.pages.clear()
   }

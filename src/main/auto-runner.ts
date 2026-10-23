@@ -1,18 +1,15 @@
 import type { DiscoveryService, DiscoveredRoom, VerifiedFudaiRoom } from './discovery-service'
 import type { RoomManager } from './room-manager'
 import type { StatsService } from './stats-service'
-import { evaluate, bestSchedule, rankHistory, Evaluation, conflicts } from './strategy'
+import { evaluate, bestSchedule, rankHistory, Evaluation } from './strategy'
 import { seededRandom } from './session-engine'
-import { Opportunity, emptySession } from '../shared/policy'
+import { Opportunity, emptySession, HISTORY_STARTUP_FRESHNESS_MS, VERIFICATION_MAX_SECONDS, RETURN_PREPARATION_SECONDS } from '../shared/policy'
 import type { Policy } from '../shared/policy'
 import type { AppConfig } from '../shared/config'
 import type { ExecutionGate } from './execution-gate'
 import type { RuntimeRepository } from './runtime-repository'
 import type { SessionEngine } from './session-engine'
-import { navigationQuotaReadyAt } from './execution-gate'
-
-// A reserved room is verified again on return, then its page is reused for participation.
-const REVERIFY_SECONDS = 40
+import { navigationQuotaReadyAt, navigationSpacingReadyAt } from './execution-gate'
 
 export interface AutoRunnerEnvironment {
   execution: ExecutionGate
@@ -52,6 +49,7 @@ export class AutoRunner {
   private lastScanAt: number | null = null
   private nextScanAt = 0
   private retryAt = 0
+  private historyFreshAfter = 0
   private waitingReason = ''
   private log: (text: string) => void = () => {}
   private update: (state: ReturnType<AutoRunner['getState']>) => void = () => {}
@@ -125,6 +123,9 @@ export class AutoRunner {
     }
     if (revision !== this.revision) throw new Error('启动已取消')
     this.sourceUrl = options.sourceUrl || 'https://live.douyin.com'
+    // Freeze this cutoff for the run. Planned rest/resume keeps it, while a
+    // manual restart re-evaluates stale discovery without deleting user data.
+    this.historyFreshAfter = this.env.now() - HISTORY_STARTUP_FRESHNESS_MS
     this.env.sessionEngine.start(
       this.env.policy(),
       options.stopAfterMinutes ? this.env.now() + options.stopAfterMinutes * 60000 : null
@@ -136,6 +137,9 @@ export class AutoRunner {
     this.nextScanAt = this.env.now()
     this.retryAt = 0
     this.waitingReason = ''
+    if (Object.values(this.env.repository.account().rooms).some(
+      (r) => r.visits.length > 0 && r.lastSeenAt < this.historyFreshAfter
+    )) this.log('已排除超过30分钟未验证的历史房间；重新发现后仍可验证，收藏与账本保留')
     this.stats.markStarted()
     this.startTimer()
     this.publish()
@@ -276,9 +280,10 @@ export class AutoRunner {
       : this.env.paymentReason(room.url, o.cost) ||
         (!this.env.sessionEngine.canFinish(o.drawAt || 0) ? '无法在本时段结束前完成' : null)
     if (reason) return { ...e, feasible: false, reason }
-    // enterBeforeSeconds is a lower bound; task and global navigation latency can require more time.
+    // The lead covers loading, revalidation and tasks. Navigation spacing is
+    // reserved separately by the scheduler, never added again to task time.
     if (!open) {
-      e.leadSeconds = Math.max(e.leadSeconds + REVERIFY_SECONDS, this.env.store.get('enterBeforeSeconds'))
+      e.leadSeconds = Math.max(e.leadSeconds, this.env.store.get('enterBeforeSeconds') + RETURN_PREPARATION_SECONDS)
       e.startAt = (o.drawAt || 0) - e.leadSeconds * 1000
     }
     return e
@@ -326,23 +331,27 @@ export class AutoRunner {
       this.pool = this.pool.filter((r) => r !== due)
       this.wait('')
       this.log(`候选到时复验 ${due.name}，重新确认本轮任务与费用`)
-      return this.verifyAndSchedule(due)
+      return this.verifyAndSchedule(due, true)
     }
     if (this.env.now() < this.retryAt) return false
     // Do not start a verification that would occupy the next reservation's entry interval.
-    if (
-      this.pool.some(
-        (r) => r.evaluation.startAt < this.env.now() + (this.env.policy().navigationMaxSeconds + 40) * 1000
-      )
-    )
+    const now = this.env.now(), policy = this.env.policy(), account = this.env.repository.account()
+    const nextNavigation = navigationSpacingReadyAt(account.navigations,
+      'https://live.douyin.com/12345678', policy.navigationMaxSeconds * 1000, now)
+    if (this.pool.some(r => r.evaluation.startAt < nextNavigation +
+        Math.max(policy.navigationMaxSeconds, VERIFICATION_MAX_SECONDS + 10) * 1000))
       return this.wait('等待候选预约进房，暂不验证其他房间')
+    // Exploration must leave rolling-hour navigation slots for reserved returns.
+    if (this.pool.length && account.navigations.filter(n => n.at > now - 3600000).length +
+        this.pool.length >= policy.navigationsPerHour)
+      return this.wait('保留候选返房导航额度，暂不探索新房')
     if (this.pool.length >= this.env.store.get('candidatePoolLimit'))
       return this.wait('候选池已满，等待预约进房')
     const a = this.env.repository.account(),
       rng = seededRandom(a.session.seed + a.decisions.length),
       p = this.env.policy()
     const history = rankHistory(Object.values(a.rooms), this.env.now(), p, rng).filter(
-      (r) => r.visits.length > 0 && !this.pool.some((c) => c.url === r.url)
+      (r) => r.visits.length > 0 && r.lastSeenAt >= this.historyFreshAfter && !this.pool.some((c) => c.url === r.url)
     )
     this.pending = this.pending.filter(
       (r) =>
@@ -354,7 +363,8 @@ export class AutoRunner {
       freshRatio = recent.length ? recent.filter((n) => n.fresh).length / recent.length : 0
     const explore = history.length === 0 || freshRatio < p.explorationRatio
     let candidate: DiscoveredRoom | undefined
-    if (!explore && history[0])
+    if (this.pending.length) candidate = this.pending[0]
+    else if (!explore && history[0])
       candidate = {
         url: history[0].url,
         name: history[0].name,
@@ -408,18 +418,21 @@ export class AutoRunner {
     this.wait('')
     return this.verifyAndSchedule(candidate)
   }
-  private async verifyAndSchedule(candidate: DiscoveredRoom): Promise<boolean> {
+  private async verifyAndSchedule(candidate: DiscoveredRoom, reserved = false): Promise<boolean> {
     const signal = this.env.execution.signal
-    const result = await this.discovery.verifyRoom(candidate, { keepPageOnVerified: true })
+    const result = await this.discovery.verifyRoom(candidate, { keepPageOnVerified: true, reserved })
     try {
       this.env.assertActive(signal, true)
       if (!result.room) return true
       const room = result.room,
         open = this.assessment(room, true),
         normal = this.assessment(room, false)
+      const returnReadyAt = navigationSpacingReadyAt(this.env.repository.account().navigations,
+        room.url, this.env.policy().navigationMaxSeconds * 1000, normal.startAt)
+      const cannotReturnInTime = returnReadyAt > room.drawAt! - normal.leadSeconds * 1000
       const near =
         (room.drawAt! - this.env.now()) / 1000 <=
-        Math.max(normal.leadSeconds, this.env.store.get('enterBeforeSeconds'))
+        Math.max(normal.leadSeconds, this.env.store.get('enterBeforeSeconds')) || cannotReturnInTime
       const direct = open.feasible && near && !!result.page
       // When already inside a near-draw room, report its actual task failure, not a second-navigation estimate.
       const e = !open.feasible || near ? open : normal
@@ -449,9 +462,19 @@ export class AutoRunner {
         return true
       }
       if (direct && result.page) {
-        this.pool = this.pool.filter((r) => !conflicts(r.evaluation, e))
+        const immediate = { ...room, evaluation: { ...e, startAt: this.env.now() } }
+        const choices = [...this.pool, immediate]
+        const measured = choices.filter(r => r.evaluation.mode === 'estimate')
+        const chosen = bestSchedule(measured.length ? measured : choices, this.env.store.get('candidatePoolLimit'),
+          this.env.policy().navigationMaxSeconds)
+        if (!chosen.includes(immediate)) {
+          this.log(`跳过 ${room.name}：与已预约候选冲突，保留可完成的参与组合`)
+          this.env.repository.decision({url:room.url, action:'skip', reason:'与已预约候选时间或导航间隔冲突', score:e.score, probability:e.probability})
+          return true
+        }
+        this.pool = chosen.filter(r => r !== immediate)
         this.log(
-          `直接参与 ${room.name}：剩余 ${Math.ceil((room.drawAt! - this.env.now()) / 1000)} 秒，复用当前验证页面`
+          `接管页面，准备参与 ${room.name}：剩余 ${Math.ceil((room.drawAt! - this.env.now()) / 1000)} 秒，继续校验弹窗身份与任务`
         )
         await this.rooms.addRoomFromPage(result.page, room.url, room.name, {
           opportunity: room.opportunity,
@@ -466,11 +489,11 @@ export class AutoRunner {
       const measured = candidates.filter((c) => c.evaluation.mode === 'estimate')
       this.pool = bestSchedule(
         measured.length ? measured : candidates,
-        this.env.store.get('candidatePoolLimit')
+        this.env.store.get('candidatePoolLimit'), this.env.policy().navigationMaxSeconds
       )
       this.log(
         this.pool.some((r) => r.url === room.url)
-          ? `候选等待 ${room.name}：开奖前约 ${e.leadSeconds} 秒返回复验并参与`
+          ? `候选等待 ${room.name}：开奖前约 ${e.leadSeconds} 秒开始返房（加载、复验及调度预留 ${RETURN_PREPARATION_SECONDS} 秒），任务准备目标至少 ${e.leadSeconds - RETURN_PREPARATION_SECONDS} 秒`
           : `跳过 ${room.name}：与更优候选时间冲突或排序靠后`
       )
       return true
@@ -482,10 +505,8 @@ export class AutoRunner {
   private continuationReason(o: Opportunity): string | null {
     const p = this.env.policy(),
       e = evaluate(o, p, this.env.now(), undefined, [], true)
-    const better = this.pool.find(
-      (r) => conflicts(r.evaluation, e) && r.evaluation.mode === e.mode && r.evaluation.score > e.score * 1.15
-    )
-    return better ? '已有更高价值且时间冲突的候选，结束停留' : null
+    const reserved = this.pool.some(r => r.evaluation.startAt < e.endAt)
+    return reserved ? '已有预约候选，结束同房连轮并按预约顺序参与' : null
   }
   async manualScan(options: { sourceUrl?: string; maxRooms?: number }) {
     await this.ensureManual()

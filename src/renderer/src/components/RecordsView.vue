@@ -406,7 +406,10 @@ async function changeRoom(room: RoomProfile, key: 'favorite' | 'blocked' | 'allo
               </td>
               <td>
                 {{ label(round.prizeType) }}
-                <strong v-if="round.diamondAmount">{{ round.diamondAmount }}</strong>
+                <strong v-if="round.prizeType === 'diamond' && round.diamondAmount != null">{{ round.diamondAmount }} {{ tr('钻', 'diamonds') }}</strong>
+                <small v-else-if="round.result === 'won' && round.prizeType === 'diamond'">{{ tr('数量待确认', 'Amount pending') }}</small>
+                <small v-if="round.prizeName">{{ round.prizeName }}</small>
+                <small v-if="round.prizeQuantity != null">× {{ round.prizeQuantity }}{{ round.prizeUnit || '' }}</small>
               </td>
             </tr>
           </tbody>
