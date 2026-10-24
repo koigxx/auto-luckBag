@@ -173,7 +173,7 @@ export function parseOwnResult(text: string) {
   const compact = cleaned.replace(/\s+/g, ' ')
   const participated = /参与成功|报名成功|等待开奖|成功参与|已成功参与|已参与/.test(compact)
   const notParticipated = /未参与|没有参与|未报名|未成功参与|未获得抽奖资格/.test(compact)
-  const loss = /很遗憾.{0,12}(?:未中奖|没有中奖|没中奖|未抽中|没抽中)|(?:本次|本轮|您|你)(?:未中奖|没有中奖|没中奖|未抽中|没抽中)|^(?:未中奖|未抽中)[！!。\s]*$/m.test(cleaned)
+  const loss = /很遗憾.{0,12}(?:未中奖|没有中奖|没中奖|未抽中|没抽中)|(?:本次|本轮|您|你)(?:未中奖|没有中奖|没中奖|未抽中|没抽中)|^(?:未中奖|未抽中|没抽中福袋)[！!。\s]*$/m.test(cleaned)
   const win = /你已中奖|您已中奖|恭喜(?:你|您).{0,20}(?:中奖|获得|抽中)|^(?:恭喜中奖|中奖啦|中奖成功)(?:[！!，,。\s：:]|$)|^(?:您|你|本次|本轮)(?:已)?(?:获得|抽中)/m.test(cleaned)
   // Conflicting/negative content is not evidence for a reward.
   const qualificationOnly = /(?:获得|抽中)[^。！!\n]{0,12}(?:资格|机会)/.test(cleaned)

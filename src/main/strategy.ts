@@ -126,7 +126,8 @@ export function conflicts(
 export function bestSchedule<T extends { evaluation: Evaluation }>(items: T[], limit = 5, navigationGapSeconds = 0): T[] {
   const values = items.slice(0, 6).filter((x) => x.evaluation.feasible)
   let best: T[] = [],
-    bestScore = -Infinity
+    bestScore = -Infinity,
+    bestFallback = -Infinity
   for (let mask = 1; mask < 1 << values.length; mask++) {
     const chosen = values.filter((_, i) => mask & (1 << i)).sort((a,b) => a.evaluation.startAt-b.evaluation.startAt)
     if (
@@ -135,9 +136,14 @@ export function bestSchedule<T extends { evaluation: Evaluation }>(items: T[], l
       chosen.some((a,i) => i > 0 && a.evaluation.startAt - chosen[i-1].evaluation.startAt < navigationGapSeconds * 1000)
     )
       continue
-    const score = chosen.reduce((s, x) => s + x.evaluation.utility, 0)
-    if (score > bestScore) {
+    // Quantified utility and unknown-odds utility are not comparable. Prefer
+    // measured utility on conflicts, then fill compatible gaps with fallback
+    // opportunities instead of discarding every unknown-odds candidate.
+    const score = chosen.filter(x => x.evaluation.mode === 'estimate').reduce((s, x) => s + x.evaluation.utility, 0)
+    const fallback = chosen.filter(x => x.evaluation.mode !== 'estimate').reduce((s, x) => s + x.evaluation.utility, 0)
+    if (score > bestScore || (score === bestScore && fallback > bestFallback)) {
       bestScore = score
+      bestFallback = fallback
       best = chosen
     }
   }

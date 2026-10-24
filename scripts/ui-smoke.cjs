@@ -156,8 +156,8 @@ module.exports = async function verifyUI(config, output) {
         fixture.state.candidateCount = 2
         fixture.state.pendingVerifyCount = 3
         fixture.state.candidates = [
-          { url: url + '2', name: '示例数码好物', score: 0.2, remainingSeconds: 245, probability: null },
-          { url: url + '3', name: '示例家居直播', score: 0.3, remainingSeconds: 480, probability: 0.02 }
+          { url: url + '2', name: '示例数码好物', score: 0.2, remainingSeconds: 245, entryRemainingSeconds:155, probability: null },
+          { url: url + '3', name: '示例家居直播', score: 0.3, remainingSeconds: 480, entryRemainingSeconds:390, probability: 0.02 }
         ]
         fixture.insights.rooms = Array.from({ length: 18 }, (_, i) => ({
           url: i ? url + i : url,

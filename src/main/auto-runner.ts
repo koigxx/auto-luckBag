@@ -63,7 +63,7 @@ export class AutoRunner {
     private stats: Pick<StatsService, 'markStarted' | 'markStopped' | 'publish'>,
     private env: AutoRunnerEnvironment
   ) {
-    rooms.setContinuationCheck((o) => this.continuationReason(o))
+    rooms.setContinuationCheck((o, room) => this.continuationReason(o, room))
   }
   setResumeCheck(fn: () => Promise<boolean>): void {
     this.resumeCheck = fn
@@ -100,6 +100,7 @@ export class AutoRunner {
         reason: r.evaluation.reason,
         probability: r.evaluation.probability,
         mode: r.evaluation.mode,
+        entryRemainingSeconds: Math.max(0, Math.ceil((r.evaluation.startAt - this.env.now()) / 1000)),
         drawAt: r.drawAt,
         remainingSeconds: r.drawAt ? Math.max(0, Math.ceil((r.drawAt - this.env.now()) / 1000)) : null
       })),
@@ -433,7 +434,7 @@ export class AutoRunner {
       const near =
         (room.drawAt! - this.env.now()) / 1000 <=
         Math.max(normal.leadSeconds, this.env.store.get('enterBeforeSeconds')) || cannotReturnInTime
-      const direct = open.feasible && near && !!result.page
+      const direct = open.feasible && (near || (reserved && normal.startAt <= this.env.now())) && !!result.page
       // When already inside a near-draw room, report its actual task failure, not a second-navigation estimate.
       const e = !open.feasible || near ? open : normal
       if (e.feasible && near && !result.page) {
@@ -464,8 +465,7 @@ export class AutoRunner {
       if (direct && result.page) {
         const immediate = { ...room, evaluation: { ...e, startAt: this.env.now() } }
         const choices = [...this.pool, immediate]
-        const measured = choices.filter(r => r.evaluation.mode === 'estimate')
-        const chosen = bestSchedule(measured.length ? measured : choices, this.env.store.get('candidatePoolLimit'),
+        const chosen = bestSchedule(choices, this.env.store.get('candidatePoolLimit'),
           this.env.policy().navigationMaxSeconds)
         if (!chosen.includes(immediate)) {
           this.log(`跳过 ${room.name}：与已预约候选冲突，保留可完成的参与组合`)
@@ -485,10 +485,8 @@ export class AutoRunner {
         return true
       }
       const candidates = [...this.pool, { ...room, evaluation: e }]
-      // Do not mix an unknown-probability fallback score with a quantified estimate.
-      const measured = candidates.filter((c) => c.evaluation.mode === 'estimate')
       this.pool = bestSchedule(
-        measured.length ? measured : candidates,
+        candidates,
         this.env.store.get('candidatePoolLimit'), this.env.policy().navigationMaxSeconds
       )
       this.log(
@@ -502,7 +500,25 @@ export class AutoRunner {
       await result.page?.close().catch(() => {})
     }
   }
-  private continuationReason(o: Opportunity): string | null {
+  private continuationReason(o: Opportunity, room: {url:string;name:string}): string | null {
+    if (!this.automatic) return null
+    const candidate: VerifiedFudaiRoom = {
+      ...room, opportunity:o, drawAt:o.drawAt, verifiedAt:this.env.now(), hasFudai:true,
+      reason:'同房新一轮', remainingSeconds:Math.ceil((o.drawAt! - this.env.now()) / 1000),
+      countdownText:'', score:0, matchedSignals:['已绑定本轮弹窗'],
+      countdownSource:o.source === 'network' ? 'network' : 'visible-dom', countdownConfidence:o.confidence
+    }
+    const future = this.assessment(candidate)
+    if (future.feasible && future.startAt > this.env.now()) {
+      const scheduled = {...candidate, evaluation:future}
+      this.pool = bestSchedule([...this.pool.filter(r=>r.url!==room.url), scheduled],
+        this.env.store.get('candidatePoolLimit'), this.env.policy().navigationMaxSeconds)
+      const kept = this.pool.includes(scheduled)
+      const reason = kept ? '下一轮已加入预约队列，离房继续验证其他候选' : '下一轮与更优预约组合冲突，结束驻留'
+      this.env.repository.decision({url:room.url,action:kept?'candidate':'skip',reason,score:future.score,probability:future.probability})
+      this.log(`${room.name}：${reason}`)
+      return reason
+    }
     const p = this.env.policy(),
       e = evaluate(o, p, this.env.now(), undefined, [], true)
     const reserved = this.pool.some(r => r.evaluation.startAt < e.endAt)

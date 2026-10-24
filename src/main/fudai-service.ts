@@ -269,13 +269,12 @@ export class FudaiService {
         ? '该奖品类型未启用'
         : !this.env.canFinish(o.drawAt!)
           ? '本轮无法在计划结束前收尾'
-          : o.drawAt! + 25000 > this.openedAt + p.maxStayMinutes * 60000
-            ? '本轮超过单房停留上限'
-            : this.env.paymentReason(this.url, o.cost) ||
-              (this.rounds > 0 ? this.callbacks.mayContinue(o) : null)
+          : this.env.paymentReason(this.url, o.cost) ||
+            (this.rounds > 0 ? this.callbacks.mayContinue(o) : null) ||
+            (o.drawAt! + 25000 > this.openedAt + p.maxStayMinutes * 60000 ? '本轮超过单房停留上限' : null)
     this.env.repository.decision({
       url: this.url,
-      action: reason ? 'skip' : 'participate',
+      action: reason?.startsWith('下一轮已加入预约队列') ? 'candidate' : reason ? 'skip' : 'participate',
       reason: reason || assessment.reason,
       score: assessment.score,
       probability: assessment.probability,
@@ -318,7 +317,24 @@ export class FudaiService {
     }
     // The same identity-bound panel may update task completion without another request.
     const text = await this.dom.panelText()
+    // A one-click comment may close the task modal. Reopen only to read the
+    // outcome, never to execute another task or replay the submitted comment.
+    if (this.sent.has('confirmation-reopen')) {
+      this.waitForAction('confirmation-read', '重新查看后仍未确认本人参与，停止本轮且不重发任务')
+      return
+    }
     if (!text) {
+      if (!this.actionWaits.has('task-panel'))
+        this.callbacks.onLog(`本轮弹窗读取诊断：${await this.dom.panelDiagnostics()}；${this.observer.identityDiagnostics()}`)
+      const missingSince = this.actionWaits.get('task-panel')
+      if (this.sent.has('comment') && missingSince !== undefined && this.env.now() - missingSince >= 10000) {
+        this.sent.add('confirmation-reopen')
+        if (await this.dom.open()) {
+          this.callbacks.onLog('评论后弹窗已关闭，仅重新查看一次本人参与确认，不再执行任何任务')
+          this.actionWaits.set('confirmation-read', this.env.now())
+        } else this.doneReason = '本轮任务弹窗消失且无法重新查看，未确认参与，停止重复操作'
+        return
+      }
       this.waitForAction('task-panel', '本轮任务弹窗消失或内容无法识别，未确认参与，停止重复操作')
       return
     }
@@ -484,6 +500,7 @@ export class FudaiService {
     }
     if (this.resolvePaymentReceipt(id, started)) return
     if (this.env.now() - started >= 12000) {
+      this.callbacks.onLog(`支付回执超时诊断：${this.observer.identityDiagnostics()}`)
       this.env.repository.payment(id, 'unresolved')
       this.paymentId = null
       this.env.reportRisk('粉丝团支付结果未知，禁止重试，请核对后处理', 'payment')

@@ -57,7 +57,7 @@ function opportunity(now: number, patch: Partial<Opportunity> = {}): Opportunity
     ...patch
   }
 }
-function harness(p: Page, patch: Partial<Opportunity> = {}) {
+function harness(p: Page, patch: Partial<Opportunity> = {}, mayContinue:(o:Opportunity)=>string|null = () => null) {
   let time = Date.now(),
     data = emptyRuntime()
   const controller = new AbortController(),
@@ -103,7 +103,7 @@ function harness(p: Page, patch: Partial<Opportunity> = {}) {
       onUpdate: () => {},
       onResult: (r) => results.push(r),
       onLog: (m) => logs.push(m),
-      mayContinue: () => null
+      mayContinue
     },
     env
   )
@@ -438,6 +438,25 @@ test('unknown full-screen result overlay blocks entry clicks instead of timing o
   }finally{await p.context().close()}
 })
 
+test('observed loss wording settles the bound result and its acknowledge button closes only that result',async()=>{
+  const p=await page(css+`<script>window.outside=0;window.opened=0</script>
+    <button onclick="window.outside++">知道了</button>
+    <div id="ShortTouchLayout"><div class="ycjwPFJI" onclick="window.opened++">01:00</div></div>
+    <div class="lottery-dialog">福袋 已参与，等待开奖</div>`),h=harness(p)
+  try{
+    await h.service.tick();await h.service.tick();h.advance(120000)
+    await p.locator('.lottery-dialog').evaluate(el=>{
+      el.id='short_touch_land_lottery_land_result'
+      el.innerHTML='没抽中福袋<br>送你一个好运气~<br>查看幸运观众<button onclick="this.parentElement.remove()">知道了</button>'
+    })
+    await h.service.tick()
+    assert.equal(h.repo.account().rounds[h.repo.roundKey(url,h.o.lotteryId)].result,'lost')
+    const dom=new LotteryDom(p,new AbortController().signal,run)
+    assert.equal(await dom.reopen(),true)
+    assert.deepEqual(await p.evaluate(()=>[(window as any).outside,(window as any).opened]),[0,1])
+  }finally{await h.finish()}
+})
+
 test('missing panel after a comment attempt times out with a reason and never replays the comment',async()=>{
   const p=await page(css+`<script>window.comments=0</script><div class="lottery-dialog">福袋参与条件
     <button onclick="window.comments++;this.parentElement.remove()">一键评论</button></div>`)
@@ -446,10 +465,32 @@ test('missing panel after a comment attempt times out with a reason and never re
     await h.service.tick(); await h.service.tick(); await h.service.tick()
     h.advance(11000); await h.service.tick()
     assert.match(h.service.doneReason,/弹窗消失/)
+    assert.equal(h.logs.filter(m=>m.includes('本轮弹窗读取诊断')).length,1)
+    assert.ok(h.logs.some(m=>m.includes('"roots":[]')))
     assert.equal(h.repo.stats().participated,0)
     assert.equal(await p.evaluate(()=>(window as any).comments),1)
   }finally{await h.finish()}
 })
+test('closed comment modal reopens once for confirmation only and never executes returned tasks', async () => {
+  for (const outcome of ['已参与，等待开奖', '福袋参与条件', 'other-round']) {
+    const p=await page(css+`<script>window.comments=0;window.opens=0;window.paid=0</script>
+      <div id="ShortTouchLayout"><div class="ycjwPFJI" onclick="window.opens++;const d=document.createElement('div');d.className='lottery-dialog';d.innerHTML=window.returned;document.body.appendChild(d)">01:40</div></div>
+      <div class="lottery-dialog">福袋参与条件<button onclick="window.comments++;this.parentElement.remove()">一键评论</button></div>`)
+    const h=harness(p,{requiresComment:true,commentText:'测试'})
+    try {
+      await p.evaluate(outcome=>{(window as any).returned=outcome==='other-round'
+        ? '<div data-lottery-id="other">已参与，等待开奖</div>'
+        : outcome+'<button onclick="window.comments++">一键评论</button><button onclick="window.paid++">加入粉丝团(1钻)</button>'},outcome)
+      await h.service.tick();await h.service.tick();await h.service.tick()
+      h.advance(10000);await h.service.tick();await h.service.tick()
+      assert.equal(h.repo.stats().participated,outcome==='已参与，等待开奖'?1:0)
+      h.advance(11000);await h.service.tick();await h.service.tick()
+      assert.deepEqual(await p.evaluate(()=>[(window as any).comments,(window as any).opens,(window as any).paid]),[1,1,0])
+      if(outcome!=='已参与，等待开奖')assert.match(h.service.doneReason,/未确认本人参与/)
+    }finally{await h.finish()}
+  }
+})
+
 test('click without confirmation is a submitted unknown, never a success', async () => {
   const p = await page(css + '<div class="lottery-dialog"><h3>福袋</h3><button>立即参与</button></div>'),
     h = harness(p)
@@ -668,6 +709,29 @@ test('payment timeout blocks and never assumes a successful charge', async () =>
     await h.finish()
   }
 })
+test('a bound next round is offered to scheduling only after old settlement and before new tasks', async()=>{
+  const p=await page(css+'<script>window.clicks=0</script><div class="lottery-dialog">福袋 已参与，等待开奖</div>')
+  const offered:Opportunity[]=[]
+  const h=harness(p,{},o=>{offered.push(o);return '下一轮已加入预约队列，离房继续验证其他候选'})
+  try{
+    h.env.policy().maxStayMinutes=5
+    await h.service.tick();await h.service.tick()
+    const next=opportunity(h.now(),{lotteryId:'next',drawAt:h.now()+720000,requiresComment:true,commentText:'测试'})
+    h.service.seed(next)
+    h.advance(130000);await h.service.tick()
+    assert.equal(offered.length,0,'next round cannot replace the old settlement window')
+    h.advance(16000);await h.service.tick()
+    await p.locator('.lottery-dialog').evaluate(el=>{el.innerHTML='福袋 参与条件<button onclick="window.clicks++">一键评论</button>'})
+    h.service.observer.panelLotteryId='next'
+    await h.service.tick()
+    assert.equal(offered.length,1)
+    assert.equal(offered[0].lotteryId,'next')
+    assert.match(h.service.doneReason,/加入预约/)
+    assert.equal(await p.evaluate(()=>(window as any).clicks),0)
+    assert.equal(Object.keys(h.repo.account().rounds).length,1,'queued round has not attempted participation')
+  }finally{await h.finish()}
+})
+
 test('two distinct rounds settle independently; next round does not re-pay', async () => {
   const p = await page(
       css +
@@ -745,10 +809,12 @@ test('passive observer installs before navigation and parses only successful bus
     await p.waitForTimeout(100)
     assert.equal(observer.lastFanSuccess, 0)
     assert.ok(observer.lastFanFailure > 0)
+    assert.match(observer.identityDiagnostics(),/灯牌业务失败/)
     code = 0
     await p.evaluate(() => fetch('/webcast/gift/send/', { method: 'POST', body: 'gift_id=6937' }))
     await p.waitForTimeout(100)
     assert.ok(observer.lastFanSuccess > 0)
+    assert.match(observer.identityDiagnostics(),/灯牌业务成功/)
     observer.close()
     assert.equal((p as any).listenerCount('response'), 0)
     assert.equal((p as any).listenerCount('websocket'), 0)

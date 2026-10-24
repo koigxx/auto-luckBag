@@ -83,6 +83,7 @@ export interface AutoRunState {
     name: string
     score: number
     remainingSeconds: number | null
+    entryRemainingSeconds?: number
     reason?: string
     probability?: number | null
     mode?: string

@@ -519,6 +519,9 @@ test('own result variants distinguish unknown amounts and preserve named prize q
   assert.equal(unitUnknown.prizeQuantity,2);assert.equal(unitUnknown.prizeUnit,null)
   assert.equal(parseOwnResult('恭喜中奖！\n8钻\n12钻').diamondAmount,null)
   assert.equal(parseOwnResult('很遗憾，这次没抽中，下次好运').lost,true)
+  assert.equal(parseOwnResult('没抽中福袋\n送你一个好运气~\n查看幸运观众\n知道了').lost,true)
+  assert.equal(parseOwnResult('用户小明没抽中福袋').lost,false)
+  assert.equal(parseOwnResult('评论：没抽中福袋').lost,false)
   for (const text of ['未成功参与，本次未中奖','恭喜用户小明获得100钻石','评论：恭喜中奖！','我的奖品','恭喜中奖！本次未中奖','恭喜您获得抽奖资格','本次获得1次抽奖机会']) {
     const r=parseOwnResult(text); assert.equal(r.won,false,text)
   }

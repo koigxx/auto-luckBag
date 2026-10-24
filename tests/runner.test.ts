@@ -5,7 +5,7 @@ import { RuntimeRepository, emptyRuntime } from '../src/main/runtime-repository'
 import { SessionEngine } from '../src/main/session-engine'
 import { ExecutionGate, checkSignal } from '../src/main/execution-gate'
 import { defaults } from '../src/shared/config'
-import type { Room } from '../src/main/room-manager'
+import type { Room, RoomManager } from '../src/main/room-manager'
 import type { DiscoveryService, VerifyRoomResult } from '../src/main/discovery-service'
 import type { Opportunity } from '../src/shared/policy'
 import type { Page } from 'playwright'
@@ -80,8 +80,9 @@ function harness() {
       closeCount++
     }
   }
+  let continuation: Parameters<RoomManager['setContinuationCheck']>[0] = () => null
   const rooms = {
-    setContinuationCheck: () => {},
+    setContinuationCheck: (fn: typeof continuation) => { continuation = fn },
     getAllRooms: () => [] as Room[],
     tick: async () => {},
     addRoom: async () => {
@@ -116,6 +117,7 @@ function harness() {
     rooms,
     config,
     logs,
+    continue: (o:Opportunity, room:{url:string;name:string}) => continuation(o,room),
     advance: (ms: number) => {
       time += ms
     },
@@ -251,6 +253,54 @@ async function runFor(h: ReturnType<typeof harness>, ms: number) {
     ms -= step
   }
 }
+
+test('nine and five minute reservations survive a one-minute takeover and exploration resumes between them', async()=>{
+  const h=harness(), base=h.now(), urls=['90000001','50000001','10000001','80000001'].map(id=>'https://live.douyin.com/'+id)
+  const draws=[540,300,60,900].map(s=>base+s*1000)
+  const calls:{url:string;reserved:boolean}[]=[], entered:string[]=[]
+  let active:Room[]=[]
+  h.rooms.getAllRooms=()=>active
+  h.rooms.addRoomFromPage=async(_page?:Page,url?:string)=>{entered.push(url!);active=[{url} as Room];return active[0]}
+  h.discovery.scan=async()=>({rooms:urls.map(url=>({url,name:url,reason:'fixture',countdownText:'',remainingSeconds:null})),riskDetected:false,riskReason:''})
+  h.discovery.verifyRoom=async(room,options)=>{
+    calls.push({url:room.url,reserved:!!options?.reserved})
+    const index=urls.indexOf(room.url),drawAt=draws[index]
+    const result=verified(h,(drawAt-h.now())/1000,{drawAt,lotteryId:'round-'+index,
+      winnerCount:index===1?1:null,participantCount:index===1?100:null})
+    result.room!.url=room.url;return result
+  }
+  await h.runner.start();await pulse(h);await pulse(h);await pulse(h)
+  assert.equal(h.runner.getState().candidateCount,2,'known and unknown odds coexist')
+  await pulse(h)
+  assert.deepEqual(entered,[urls[2]])
+  assert.deepEqual(h.runner.getState().candidates.map(r=>r.url),[urls[1],urls[0]])
+  await pulse(h,10000);assert.equal(calls.length,3,'active participation stays serial')
+  await runFor(h,base+85000-h.now());active=[];await pulse(h)
+  assert.equal(calls.at(-1)!.url,urls[3],'explore the free interval after settlement')
+  await runFor(h,base+210000-h.now())
+  assert.deepEqual(entered,[urls[2],urls[1]])
+  assert.equal(calls.at(-1)!.reserved,true)
+  await runFor(h,base+325000-h.now());active=[]
+  await runFor(h,base+450000-h.now())
+  assert.deepEqual(entered,[urls[2],urls[1],urls[0]],JSON.stringify({state:h.runner.getState(),calls,logs:h.logs.slice(-10)}))
+  assert.ok(h.runner.getState().candidates.some(r=>r.url===urls[3]))
+  await h.runner.stop()
+})
+
+test('a ten-minute next round returns to the reservation pool without displacing a compatible earlier room',async()=>{
+  const h=harness(),url='https://live.douyin.com/99999999'
+  h.discovery.verifyRoom=async()=>verified(h,300,{winnerCount:1,participantCount:100})
+  await h.runner.start();await pulse(h);await pulse(h)
+  const old=h.runner.getState().candidates[0]
+  const next=verified(h,600,{lotteryId:'next-round'}).room!.opportunity
+  const reason=h.continue(next,{url,name:'returning'})
+  assert.match(reason!,/下一轮已加入预约/)
+  assert.deepEqual(h.runner.getState().candidates.map(r=>r.url),[old.url,url])
+  assert.equal(h.counts().entered,0)
+  h.continue({...next,drawAt:next.drawAt!+1000},{url,name:'returning'})
+  assert.equal(h.runner.getState().candidateCount,2,'same room replaces its stale round instead of duplicating')
+  await h.runner.stop();assert.equal(h.runner.getState().candidateCount,0)
+})
 
 test('free manual-participation bag with 40 seconds is taken over from the verification page', async () => {
   const h = harness()

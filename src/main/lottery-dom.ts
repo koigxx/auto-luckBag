@@ -126,6 +126,21 @@ export class LotteryDom {
       await p.dispose()
     }
   }
+  async panelDiagnostics(): Promise<string> {
+    // Structural evidence only: never log page text, comments, account data or HTML.
+    return this.page.evaluate(({selector, known}) => JSON.stringify({
+      viewport: [innerWidth, innerHeight],
+      roots: [...document.querySelectorAll<HTMLElement>(selector)].slice(0, 12).map(el => {
+        const r=el.getBoundingClientRect(), s=getComputedStyle(el), t=el.innerText || ''
+        return {known:el.matches(known), tag:el.tagName,
+          rect:[r.x,r.y,r.width,r.height].map(Math.round),
+          shown:s.display!=='none' && s.visibility!=='hidden' && +s.opacity>0.05,
+          length:t.length, heading:/福袋|开奖/.test(t),
+          confirmation:/参与成功|报名成功|等待开奖|成功参与|已参与/.test(t),
+          children:el.children.length}
+      })
+    }), {selector:MODAL_SELECTOR, known:KNOWN_ROOTS})
+  }
   async panelSnapshot(): Promise<{text:string; resultPanel:boolean; lotteryId:string|null}> {
     const p = await this.panel()
     if (!p) return {text:'', resultPanel:false, lotteryId:null}
@@ -227,9 +242,11 @@ export class LotteryDom {
           const isClose = (el: Element, box: {x: number; y: number; width: number; height: number}) => {
             const label = el.getAttribute('aria-label') || el.getAttribute('title') || el.getAttribute('alt') || (el as HTMLElement).innerText || ''
             const marker = [el.id, el.getAttribute('class'), el.getAttribute('data-icon')].join(' ')
+            const acknowledge = label.trim() === '知道了' &&
+              !!el.closest('#short_touch_land_lottery_land_result')
             // Graphic close controls often have no text. Require an explicit
             // close marker as well as a small control beside this lottery panel.
-            const explicit = /^(?:关闭|关闭福袋|关闭弹窗|×|✕|✖)$/.test(label.trim()) ||
+            const explicit = acknowledge || /^(?:关闭|关闭福袋|关闭弹窗|×|✕|✖)$/.test(label.trim()) ||
               (!label.trim() && /close/i.test(marker))
             const r = el.getBoundingClientRect(), s = getComputedStyle(el)
             return explicit &&
@@ -237,7 +254,7 @@ export class LotteryDom {
               !el.querySelector('button,[role="button"]') &&
               !el.hasAttribute('disabled') && el.getAttribute('aria-disabled') !== 'true' &&
               s.display !== 'none' && s.visibility !== 'hidden' && +s.opacity > 0.05 &&
-              r.width >= 12 && r.width <= 64 && r.height >= 12 && r.height <= 64 &&
+              r.width >= 12 && r.width <= (acknowledge ? 320 : 64) && r.height >= 12 && r.height <= 64 &&
               r.left >= box.x && r.right <= box.x + box.width &&
               r.top >= box.y && r.bottom <= box.y + box.height + 80 &&
               r.top >= 0 && r.left >= 0 && r.bottom <= innerHeight && r.right <= innerWidth

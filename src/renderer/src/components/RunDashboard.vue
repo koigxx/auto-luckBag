@@ -390,8 +390,11 @@ function start() {
                     )
               }}
             </p>
+              <p v-if="candidate.entryRemainingSeconds != null">
+                {{ tr('返房倒计时', 'Return in') }} {{ duration(candidate.entryRemainingSeconds) }}
+              </p>
           </div>
-          <time>{{ duration(candidate.remainingSeconds) }}</time>
+            <time>{{ tr('开奖', 'Draw') }} {{ duration(candidate.remainingSeconds) }}</time>
         </div>
       </section>
     </div>

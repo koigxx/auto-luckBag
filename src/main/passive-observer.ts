@@ -43,14 +43,14 @@ export class PassiveObserver {
   private requestFailed = (request: Request): void => {
     if (!this.alive || this.signal.aborted) return
     const url = new URL(request.url())
-    if ((url.hostname === 'douyin.com' || url.hostname.endsWith('.douyin.com')) && /\/lottery\//.test(url.pathname))
+    if ((url.hostname === 'douyin.com' || url.hostname.endsWith('.douyin.com')) && /\/(?:lottery|gift\/send)\//.test(url.pathname))
       this.note(url.pathname, '请求失败，未收到完整响应')
   }
   private response = (response: Response): void => {
     void this.readResponse(response).catch(() => {
       if (!this.alive || this.signal.aborted) return
       const url = new URL(response.url())
-      if ((url.hostname === 'douyin.com' || url.hostname.endsWith('.douyin.com')) && /\/lottery\//.test(url.pathname))
+      if ((url.hostname === 'douyin.com' || url.hostname.endsWith('.douyin.com')) && /\/(?:lottery|gift\/send)\//.test(url.pathname))
         this.note(url.pathname, '响应处理异常')
     })
   }
@@ -59,6 +59,7 @@ export class PassiveObserver {
     const url = new URL(response.url())
     if (!(url.hostname === 'douyin.com' || url.hostname.endsWith('.douyin.com'))) return
     const lotteryPath = /\/lottery\//.test(url.pathname)
+    const paymentPath = /\/gift\/send\//.test(url.pathname)
     if (!url.pathname.startsWith('/webcast/')) {
       if (lotteryPath) this.note(url.pathname, '路径不在已支持范围内')
       return
@@ -76,9 +77,9 @@ export class PassiveObserver {
       this.panelLotteryId = null
       this.panelIdentityReason = '已收到弹窗响应，正在读取内容'
     }
-    if (lotteryPath) this.note(url.pathname, `HTTP ${response.status()}，正在读取内容`)
+    if (lotteryPath || paymentPath) this.note(url.pathname, `HTTP ${response.status()}，正在读取内容`)
     const failed = (reason: string): void => {
-      if (lotteryPath) this.note(url.pathname, reason)
+      if (lotteryPath || paymentPath) this.note(url.pathname, reason)
       if (isRight && requestAt === this.newestPanelRequestAt) this.panelIdentityReason = reason
     }
     if(response.status()===429){failed('HTTP 429，请求限流');this.reportRisk('服务返回请求限流','response');return}
@@ -94,6 +95,10 @@ export class PassiveObserver {
     if (code === 95152 || (code !== 0 && error)) { this.reportRisk(error || `服务返回限制代码 ${code}`, 'response'); return }
     if (/\/gift\/send\//.test(url.pathname)) {
       const post=response.request().postData()||'', started=response.request().timing().startTime
+      this.note(url.pathname, !/(?:^|&)gift_id=6937(?:&|$)/.test(post) ? '非已识别灯牌请求，不作为支付回执' :
+        !Number.isFinite(started) || started <= 0 || Date.now()-started>=20000 ? '请求时间缺失或回执过期' :
+        response.ok() && success ? '灯牌业务成功' :
+        json.status_code !== null && json.status_code !== '' && Number.isFinite(code) && code !== 0 ? '灯牌业务失败' : '未获得明确业务结果')
       if (/(?:^|&)gift_id=6937(?:&|$)/.test(post) && Date.now()-started<20000) {
         if(response.ok() && success)this.lastFanSuccess=started
         else if(json.status_code !== null && json.status_code !== '' && Number.isFinite(code) && code !== 0)this.lastFanFailure=started
