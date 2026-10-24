@@ -84,7 +84,7 @@ function harness(p: Page, patch: Partial<Opportunity> = {}, mayContinue:(o:Oppor
     signal: controller.signal,
     now: () => time,
     repository: repo,
-    getConfig: () => ({ ...defaults, policy }),
+    getConfig: () => ({ ...defaults, policy, enterBeforeSeconds: 600 }),
     policy: () => policy,
     assertActive: checkSignal,
     paymentReason: (_url, cost) => repo.canPay(url, cost, 10, false, policy),
@@ -560,6 +560,120 @@ test('comment precedes paid fan task in the same modal; no extra entry click', a
     await h.finish()
   }
 })
+test('completed fan task is a timeout-only payment fallback and never repeats payment', async () => {
+  const p = await page(css + `<script>window.pays=0</script><div class="lottery-dialog" data-lottery-id="b1"><h3>福袋</h3><p id="fan">加入粉丝团 未完成</p><button onclick="window.pays++;document.querySelector('#fan').textContent='加入粉丝团 已完成';this.remove()">加入粉丝团(1钻石)</button></div>`)
+  const h = harness(p, {membership: 'needs-payment', cost: 1})
+  try {
+    await h.service.tick(); await h.service.tick()
+    h.advance(11000); await h.service.tick()
+    assert.equal(Object.values(h.repo.account().payments)[0].state, 'submitted')
+    h.advance(1000); await h.service.tick()
+    assert.equal(Object.values(h.repo.account().payments)[0].state, 'confirmed')
+    assert.equal(h.repo.budget(10, false, h.env.policy()).spent, 1)
+    assert.equal(h.repo.budget(10, false, h.env.policy()).reserved, 0)
+    assert.equal(h.risks.length, 0)
+    assert.ok(h.logs.some(x => x.includes('兜底确认付款')))
+    await h.service.tick(); await h.service.tick()
+    assert.equal(await p.evaluate(() => (window as any).pays), 1)
+    assert.equal(Object.values(h.repo.account().payments).length, 1)
+  } finally { await h.finish() }
+})
+
+test('payment fallback rejects unrelated or ambiguous completion and preserves explicit failure', async () => {
+  for (const scenario of ['changed-round','changed-rights','dom-id','missing','comment','conflict','hidden','failure','stop']) {
+    const p = await page(css + '<div class="lottery-dialog" data-lottery-id="b1"><h3>福袋</h3><p id="fan">加入粉丝团 未完成</p><button>加入粉丝团(1钻石)</button></div>')
+    const h = harness(p, {membership:'needs-payment',cost:1})
+    try {
+      await h.service.tick(); await h.service.tick()
+      await p.evaluate(() => {document.querySelector('#fan')!.textContent='加入粉丝团 已完成'})
+      if (scenario === 'changed-round') h.service.seed({...h.o,lotteryId:'b2',observedAt:h.now()+1})
+      if (scenario === 'changed-rights') h.service.observer.panelLotteryId='b2'
+      if (scenario === 'dom-id') await p.evaluate(() => document.querySelector('.lottery-dialog')!.setAttribute('data-lottery-id','b2'))
+      if (scenario === 'missing') await p.evaluate(() => {document.querySelector('#fan')!.textContent='已参与，等待开奖'})
+      if (scenario === 'comment') await p.evaluate(() => {document.querySelector('#fan')!.textContent='评论口令：加入粉丝团 已完成'})
+      if (scenario === 'conflict') await p.evaluate(() => document.querySelector('.lottery-dialog')!.insertAdjacentHTML('beforeend','<p>点亮灯牌 未完成</p>'))
+      if (scenario === 'hidden') await p.evaluate(() => {(document.querySelector('.lottery-dialog') as HTMLElement).style.display='none'})
+      if (scenario === 'failure') h.service.observer.lastFanFailure=h.now()
+      if (scenario === 'stop') {h.controller.abort();h.service.stopMonitoring()}
+      h.advance(12000); await h.service.tick()
+      assert.equal(Object.values(h.repo.account().payments)[0].state,scenario === 'failure' ? 'failed' : 'unresolved',scenario)
+      assert.equal(h.repo.budget(10,false,h.env.policy()).spent,0,scenario)
+      assert.equal(h.logs.some(x=>x.includes('兜底确认付款')),false,scenario)
+    } finally {await h.finish()}
+  }
+})
+
+test('a returned page waits until the 45-second task window but starts earlier for long watch tasks', async () => {
+  for (const watch of [0, 60]) {
+    const p = await page(css + '<script>window.calls=0</script><div class="lottery-dialog"><h3>福袋</h3><button onclick="window.calls++">发送口令</button></div>')
+    const h = harness(p, {requiresComment:true,commentText:'测试',watchSeconds:watch})
+    h.env.getConfig=()=>({...defaults,enterBeforeSeconds:45})
+    try {
+      await h.service.tick(); await h.service.tick()
+      assert.equal(await p.evaluate(()=>(window as any).calls),0)
+      h.advance(74000); await h.service.tick()
+      assert.equal(await p.evaluate(()=>(window as any).calls),watch ? 1 : 0)
+      h.advance(1000); await h.service.tick()
+      assert.equal(await p.evaluate(()=>(window as any).calls),1)
+      await p.evaluate(()=>{document.querySelector('.lottery-dialog')!.innerHTML='<h3>福袋</h3>已参与，等待开奖'})
+      await h.service.tick()
+      assert.ok(Object.values(h.repo.account().rounds)[0].taskSeconds! <= 1, "idle window must not inflate learned task time")
+    } finally {await h.finish()}
+  }
+})
+
+test('a due reservation ends next-round waiting immediately after settlement', async () => {
+  const p = await page(css + '<div class="lottery-dialog"><h3>福袋</h3>已参与，等待开奖</div>')
+  const h = harness(p)
+  try {
+    await h.service.tick();await h.service.tick()
+    h.advance(145000); await h.service.tick()
+    ;(h.service as any).callbacks.mayWaitForNext=()=> '已有预约到时，结束等待新福袋并返房复验'
+    await h.service.tick()
+    assert.match(h.service.doneReason,/已有预约到时/)
+  } finally {await h.finish()}
+})
+
+test('a reservation becoming due in the action queue cancels next-round reopening', async () => {
+  const p = await page(css + `<script>window.closes=0</script><div class="lottery-dialog"><h3>福袋</h3>已参与，等待开奖<button style="width:40px" aria-label="关闭福袋" onclick="window.closes++">×</button></div>`)
+  const h = harness(p)
+  try {
+    await h.service.tick();await h.service.tick()
+    h.advance(145000);await h.service.tick()
+    let due=false
+    ;(h.service as any).callbacks.mayWaitForNext=()=>due?'已有预约到时，结束等待新福袋并返房复验':null
+    h.env.perform=async(signal,fn)=>{due=true;return run(signal,fn)}
+    await h.service.tick()
+    assert.match(h.service.doneReason,/已有预约到时/)
+    assert.equal(await p.evaluate(()=>(window as any).closes),0)
+  } finally {await h.finish()}
+})
+
+test('conflicting receipts and fallback DOM failures preserve pending spend and block', async () => {
+  for (const scenario of ['conflict','read-error']) {
+    const p=await page(css+'<div class="lottery-dialog"><h3>福袋</h3><button>加入粉丝团(1钻石)</button></div>')
+    const h=harness(p,{membership:'needs-payment',cost:1})
+    try {
+      await h.service.tick();await h.service.tick()
+      if(scenario==='conflict'){
+        h.service.observer.lastFanSuccess=h.now()
+        h.service.observer.lastFanFailure=h.now()
+      } else {
+        ;(h.service as any).dom.panelSnapshot=async()=>{throw new Error('fixture DOM detached')}
+        h.advance(12000)
+      }
+      await h.service.tick()
+      assert.equal(Object.values(h.repo.account().payments)[0].state,'unresolved',scenario)
+      assert.equal(h.repo.budget(10,false,h.env.policy()).reserved,1,scenario)
+      assert.equal(h.repo.budget(10,false,h.env.policy()).spent,0,scenario)
+      assert.equal(h.risks.length,1,scenario)
+      assert.equal(h.repo.account().session.phase,'blocked',scenario)
+      await h.service.tick()
+      assert.equal(Object.values(h.repo.account().payments).length,1)
+    }finally{await h.finish()}
+  }
+})
+
 test('stopping in payment confirmation preserves unresolved cost and prevents retry', async () => {
   const p = await page(
       css + '<div class="lottery-dialog"><h3>福袋</h3><button>加入粉丝团(1钻石)</button></div>'
@@ -823,6 +937,49 @@ test('passive observer installs before navigation and parses only successful bus
     await context.close()
   }
 })
+test('payment receipts use observed request time, accept trailing-slash variants and reject missing timing', async () => {
+  const p = await page(''), controller = new AbortController()
+  const observer = new PassiveObserver(p, controller.signal, () => {})
+  const request = (path: string) => ({url: () => `https://live.douyin.com${path}`, method: () => 'POST', postData: () => 'gift_id=6937', timing: () => ({startTime: -1})})
+  const response = (req: ReturnType<typeof request>) => ({url: req.url, request: () => req, status: () => 200, ok: () => true, text: async () => '{"status_code":0}'})
+  try {
+    observer.beginPaymentObservation()
+    const unobserved = request('/webcast/gift/send/')
+    await (observer as any).readResponse(response(unobserved))
+    assert.equal(observer.lastFanSuccess, 0, 'response time cannot substitute for dispatch time')
+    const observed = request('/webcast/gift/send')
+    ;(observer as any).request(observed)
+    const originalTime = (observer as any).requestTimes.get(observed)
+    await p.waitForTimeout(20)
+    const newerPaymentStarted = Date.now()
+    await (observer as any).readResponse(response(observed))
+    assert.equal(observer.lastFanSuccess, originalTime)
+    assert.ok(observer.lastFanSuccess < newerPaymentStarted, 'late older receipt cannot confirm a newer payment')
+    observer.close()
+    assert.equal((p as any).listenerCount('request'), 0)
+    assert.equal((p as any).listenerCount('requestfailed'), 0)
+  } finally { observer.close(); await p.context().close() }
+})
+
+test('unknown payment paths are diagnosed without authorizing spend or leaking payloads', async () => {
+  const p = await page(''), controller = new AbortController()
+  const observer = new PassiveObserver(p, controller.signal, () => {})
+  const req = {url: () => 'https://example.invalid/payment/123456789?token=secret', method: () => 'POST', postData: () => 'gift_id=6937&secret=private', timing: () => ({startTime: Date.now()})}
+  try {
+    observer.beginPaymentObservation()
+    ;(observer as any).request(req)
+    assert.match(observer.identityDiagnostics(), /已发出，尚无响应/)
+    await (observer as any).readResponse({url: req.url, request: () => req, status: () => 200, ok: () => true, text: async () => '{"status_code":0}'})
+    assert.equal(observer.lastFanSuccess, 0)
+    assert.match(observer.identityDiagnostics(), /其他域 \/payment\/:segment: HTTP 200/)
+    assert.doesNotMatch(observer.identityDiagnostics(), /secret|private|123456789|example.invalid/)
+    ;(observer as any).requestFailed(req)
+    assert.match(observer.identityDiagnostics(), /请求失败/)
+    observer.beginPaymentObservation()
+    assert.doesNotMatch(observer.identityDiagnostics(), /payment/)
+  } finally { observer.close(); await p.context().close() }
+})
+
 test('late older lottery never overwrites a newer round', async () => {
   const p = await page(''),
     controller = new AbortController(),
@@ -1169,15 +1326,15 @@ test('passive partial rights plus live panel updates complete all task paths wit
   }
 })
 
-test('reopening an unbound panel uses its explicit close button when Escape does nothing', async () => {
-  const p = await page(css + `<script>window.closes=0;window.opens=0</script>
+test('reopening uses only the lottery close control and never presses global Escape', async () => {
+  const p = await page(css + `<script>window.closes=0;window.opens=0;window.escapes=0;document.addEventListener("keydown",e=>{if(e.key==="Escape")window.escapes++})</script>
     <button aria-label="关闭" onclick="throw new Error('unrelated close')">关闭</button>
     <div id="ShortTouchLayout"><div class="ycjwPFJI" onclick="window.opens++;document.querySelector('.lottery-dialog').style.display='block'">03:00</div></div>
     <div class="lottery-dialog">福袋参与条件<button style="width:40px" aria-label="关闭福袋" onclick="window.closes++;this.parentElement.style.display='none'">×</button></div>`)
   try {
     const dom = new LotteryDom(p, new AbortController().signal, run)
     assert.equal(await dom.reopen(), true)
-    assert.deepEqual(await p.evaluate(() => [(window as any).closes, (window as any).opens]), [1, 1])
+    assert.deepEqual(await p.evaluate(() => [(window as any).closes, (window as any).opens, (window as any).escapes]), [1, 1, 0])
   } finally { await p.context().close() }
 })
 

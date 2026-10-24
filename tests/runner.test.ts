@@ -117,7 +117,7 @@ function harness() {
     rooms,
     config,
     logs,
-    continue: (o:Opportunity, room:{url:string;name:string}) => continuation(o,room),
+    continue: (o:Opportunity|null, room:{url:string;name:string}) => continuation(o,room),
     advance: (ms: number) => {
       time += ms
     },
@@ -299,6 +299,11 @@ test('a ten-minute next round returns to the reservation pool without displacing
   assert.equal(h.counts().entered,0)
   h.continue({...next,drawAt:next.drawAt!+1000},{url,name:'returning'})
   assert.equal(h.runner.getState().candidateCount,2,'same room replaces its stale round instead of duplicating')
+  assert.equal(h.continue(null,{url,name:'returning'}),null)
+  h.advance(old.entryRemainingSeconds! * 1000)
+  assert.match(h.continue(null,{url,name:'returning'})!,/已有预约到时/)
+  h.advance(old.drawAt! - h.now() + 1)
+  assert.equal(h.continue(null,{url,name:'returning'}),null,'expired reservations must not force a room to leave')
   await h.runner.stop();assert.equal(h.runner.getState().candidateCount,0)
 })
 

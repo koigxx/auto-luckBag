@@ -500,8 +500,13 @@ export class AutoRunner {
       await result.page?.close().catch(() => {})
     }
   }
-  private continuationReason(o: Opportunity, room: {url:string;name:string}): string | null {
+  private continuationReason(o: Opportunity | null, room: {url:string;name:string}): string | null {
     if (!this.automatic) return null
+    // Pool expiry is normally pruned by cycle(), which does not run while a
+    // room is active. Expired reservations must not force that room to leave.
+    const reservations = this.pool.filter(r => r.drawAt !== null && r.drawAt > this.env.now())
+    if (!o) return reservations.some(r => r.evaluation.startAt <= this.env.now())
+      ? '已有预约到时，结束等待新福袋并返房复验' : null
     const candidate: VerifiedFudaiRoom = {
       ...room, opportunity:o, drawAt:o.drawAt, verifiedAt:this.env.now(), hasFudai:true,
       reason:'同房新一轮', remainingSeconds:Math.ceil((o.drawAt! - this.env.now()) / 1000),
@@ -515,13 +520,12 @@ export class AutoRunner {
         this.env.store.get('candidatePoolLimit'), this.env.policy().navigationMaxSeconds)
       const kept = this.pool.includes(scheduled)
       const reason = kept ? '下一轮已加入预约队列，离房继续验证其他候选' : '下一轮与更优预约组合冲突，结束驻留'
-      this.env.repository.decision({url:room.url,action:kept?'candidate':'skip',reason,score:future.score,probability:future.probability})
-      this.log(`${room.name}：${reason}`)
+      // The room service records the decision; RoomManager emits its final reason once.
       return reason
     }
     const p = this.env.policy(),
       e = evaluate(o, p, this.env.now(), undefined, [], true)
-    const reserved = this.pool.some(r => r.evaluation.startAt < e.endAt)
+    const reserved = reservations.some(r => r.evaluation.startAt < e.endAt)
     return reserved ? '已有预约候选，结束同房连轮并按预约顺序参与' : null
   }
   async manualScan(options: { sourceUrl?: string; maxRooms?: number }) {

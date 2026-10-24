@@ -231,9 +231,8 @@ export class LotteryDom {
     if (!panel) return this.open()
     const bounds = await panel.boundingBox()
     await panel.dispose()
-    await this.perform(this.signal, () => this.page.keyboard.press('Escape'))
     if (await this.panelText()) {
-      // Some lottery overlays ignore Escape. Only use a small, explicitly labelled
+      // Only use a small, explicitly labelled
       // close control inside/adjacent to this panel; never click an opaque container.
       if (!bounds) { this.lastOpenResult = '未取得弹窗边界，无法安全重开'; return false }
       const controls = await this.page.$$('button, [role="button"], [aria-label], [title], div, span, svg, img')
@@ -270,7 +269,7 @@ export class LotteryDom {
       } finally { await Promise.all(controls.map(el => el.dispose())) }
     }
     if (await this.panelText()) {
-      this.lastOpenResult = '弹窗未关闭，未重新点击入口（Escape无效或没有可识别的关闭控件）'
+      this.lastOpenResult = '弹窗未关闭，未重新点击入口（没有可识别的关闭控件）'
       return false
     }
     return this.open()

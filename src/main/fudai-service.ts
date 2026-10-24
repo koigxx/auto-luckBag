@@ -2,7 +2,7 @@ import { Page } from 'playwright'
 import { Opportunity, Policy } from '../shared/policy'
 import { PassiveObserver } from './passive-observer'
 import { LotteryDom } from './lottery-dom'
-import { parseOwnResult, supplementVisibleTask } from './lottery-parser'
+import { parseOwnResult, supplementVisibleTask, visibleFanTaskCompleted } from './lottery-parser'
 import { evaluate, taskLead } from './strategy'
 import type { RuntimeRepository } from './runtime-repository'
 import type { AppConfig } from '../shared/config'
@@ -34,6 +34,7 @@ export interface FudaiCallbacks {
   onResult: (result: FudaiGrabResult) => void
   onLog: (message: string) => void
   mayContinue: (o: Opportunity) => string | null
+  mayWaitForNext?: () => string | null
 }
 
 /** One page, one current lottery. The settled IDs and ledger prohibit replaying a round. */
@@ -77,6 +78,10 @@ export class FudaiService {
     this.dom = new LotteryDom(page, this.signal, (signal, action) => this.env.perform(signal, async () => {
       this.env.assertActive(signal)
       if (this.stopped || this.doneReason) throw new Error('本页已停止，取消操作')
+      if (!this.current && this.rounds > 0) {
+        const reason = this.callbacks.mayWaitForNext?.()
+        if (reason) throw new Error(reason)
+      }
       // The global action gate may wait. Recheck the round at dispatch time too.
       if (this.current && (this.observer.latest?.lotteryId !== this.current.lotteryId ||
           this.observer.panelLotteryId !== this.current.lotteryId ||
@@ -157,7 +162,17 @@ export class FudaiService {
       return
     }
     if (this.paymentId) {
-      await this.settlePayment()
+      try { await this.settlePayment() }
+      catch (error) {
+        // A DOM read failure must not merely end this room and let other paid
+        // work continue while the dispatched transaction has no outcome.
+        if (!this.stopped && !this.signal.aborted && this.paymentId && this.paymentDispatched) {
+          this.env.repository.payment(this.paymentId, 'unresolved')
+          this.paymentId = null
+          this.env.reportRisk('付款确认过程异常，支付结果未明确，请核对账本', 'payment')
+        }
+        throw error
+      }
       return
     }
     if (this.current) {
@@ -205,12 +220,22 @@ export class FudaiService {
         this.doneReason = '当前弹窗不能归属于本轮福袋'
         return
       }
+      const records = Object.values(this.env.repository.account().rounds).filter(r => r.roomUrl === this.url)
+      const preparation = Math.max(this.env.getConfig().enterBeforeSeconds, taskLead(this.current!, p, records, true))
+      if (!this.sent.size && now < (current.drawAt || 0) - preparation * 1000) {
+        this.callbacks.onUpdate(this.current, this.rounds, '等待任务准备窗口')
+        return
+      }
       await this.tasks(this.current!)
       return
     }
     if (this.env.repository.account().session.phase !== 'running') {
       this.doneReason = '当前轮次结束，停止接新任务'
       return
+    }
+    if (this.rounds > 0) {
+      const reason = this.callbacks.mayWaitForNext?.()
+      if (reason) { this.doneReason = reason; return }
     }
     if (now - this.waitingSince > p.nextRoundWaitSeconds * 1000) {
       const latest = this.observer.latest
@@ -231,7 +256,7 @@ export class FudaiService {
     let o = this.observer.latest
     // A result overlay belongs to settlement, never to a new participation.
     if ((await this.dom.panelSnapshot()).resultPanel) {
-      if (now - this.lastOpenAt >= 15000) {
+      if (now - this.lastOpenAt >= (this.rounds > 0 ? 3000 : 15000)) {
         this.lastOpenAt = now
         await this.dom.reopen()
         this.callbacks.onLog(`等待关闭上一轮结果弹窗：${this.dom.lastOpenResult}`)
@@ -239,7 +264,7 @@ export class FudaiService {
       return
     }
     if (!o || !o.lotteryId || this.settled.has(o.lotteryId)) {
-      if (now - this.lastOpenAt >= 15000) {
+      if (now - this.lastOpenAt >= (this.rounds > 0 ? 3000 : 15000)) {
         this.lastOpenAt = now
         // Dismiss only our old result panel, then inspect the next visible entry once.
         if (this.rounds > 0) await this.dom.reopen()
@@ -248,7 +273,7 @@ export class FudaiService {
       return
     }
     if (this.observer.panelLotteryId !== o.lotteryId) {
-      if (now - this.lastOpenAt >= 15000) {
+      if (now - this.lastOpenAt >= (this.rounds > 0 ? 3000 : 15000)) {
         this.lastOpenAt = now
         await this.dom.reopen()
         this.callbacks.onLog(`弹窗身份待确认：${this.dom.lastOpenResult}；${this.observer.identityDiagnostics()}`)
@@ -303,14 +328,16 @@ export class FudaiService {
       this.sent.add('follow')
       this.followStarted = attempts.follow.at
     }
-    this.roundStarted = now
+    this.roundStarted = 0
     this.watchUntil = now + (o.watchSeconds || 0) * 1000
     this.env.repository.record(this.url, o.lotteryId, { drawAt: o.drawAt })
-    this.callbacks.onLog('弹窗身份与任务校验通过，开始完成本轮任务；提交后仍需确认参与结果')
-    this.callbacks.onUpdate(o, this.rounds, '完成任务')
+    this.callbacks.onLog('弹窗身份与任务校验通过，将在任务准备窗口执行；提交后仍需确认参与结果')
+    this.callbacks.onUpdate(o, this.rounds, '等待任务准备窗口')
     await this.dom.open()
   }
   private async tasks(o: Opportunity): Promise<void> {
+    if (!this.roundStarted) this.roundStarted = this.env.now()
+    this.callbacks.onUpdate(o, this.rounds, '完成任务')
     if (o.requiresShare || o.unsupported.length) {
       this.doneReason = '任务条件发生变化，停止本轮'
       return
@@ -433,6 +460,7 @@ export class FudaiService {
             this.callbacks.onLog('当前弹窗仅有粉丝团任务入口，先完成粉丝团，再继续一键评论')
           this.env.repository.payment(payment.id, 'submitted')
           this.paymentStarted = this.env.now()
+          this.observer.beginPaymentObservation()
           this.paymentDispatched = true
         })
         if (!clicked) {
@@ -500,6 +528,23 @@ export class FudaiService {
     }
     if (this.resolvePaymentReceipt(id, started)) return
     if (this.env.now() - started >= 12000) {
+      // Only after the normal receipt deadline: the user-authorized fallback
+      // requires a completed fan task in the same identity-bound current panel.
+      const panel = await this.dom.panelSnapshot()
+      this.env.assertActive(this.signal)
+      if (this.stopped || this.paymentId !== id) return
+      // A response may have arrived while reading the DOM. It still takes priority.
+      if (this.resolvePaymentReceipt(id, started)) return
+      if (this.paymentDispatched && o.membership === 'needs-payment' &&
+          this.observer.latest?.lotteryId === o.lotteryId &&
+          this.observer.panelLotteryId === o.lotteryId &&
+          (!panel.lotteryId || panel.lotteryId === o.lotteryId) &&
+          !panel.resultPanel && visibleFanTaskCompleted(panel.text)) {
+        this.env.repository.payment(id, 'confirmed')
+        this.paymentId = null
+        this.callbacks.onLog('支付回执超时，但同一福袋粉丝团任务已明确完成，按任务反馈兜底确认付款；不重复付款')
+        return
+      }
       this.callbacks.onLog(`支付回执超时诊断：${this.observer.identityDiagnostics()}`)
       this.env.repository.payment(id, 'unresolved')
       this.paymentId = null
@@ -507,6 +552,12 @@ export class FudaiService {
     }
   }
   private resolvePaymentReceipt(id: string, started: number): boolean {
+    if (this.observer.lastFanSuccess >= started && this.observer.lastFanFailure >= started) {
+      this.env.repository.payment(id, 'unresolved')
+      this.paymentId = null
+      this.env.reportRisk('粉丝团支付回执冲突，请核对账本，禁止重试', 'payment')
+      return true
+    }
     if (this.observer.lastFanSuccess >= started) {
       this.env.repository.payment(id, 'confirmed')
       this.paymentId = null
@@ -546,7 +597,7 @@ export class FudaiService {
       confirmedAt: this.env.now(),
       submittedAt: before?.submittedAt ?? (this.commentStarted || this.env.now()),
       // A first confirmation at draw time includes waiting, not task latency.
-      taskSeconds: after ? (before?.taskSeconds ?? null) : (this.env.now() - this.roundStarted) / 1000,
+      taskSeconds: after ? (before?.taskSeconds ?? null) : this.roundStarted ? (this.env.now() - this.roundStarted) / 1000 : null,
       ...(after && result.won
         ? { result: 'won' as const, prizeType: result.prizeType, diamondAmount: result.diamondAmount,
             prizeName: result.prizeName, prizeQuantity: result.prizeQuantity, prizeUnit: result.prizeUnit }

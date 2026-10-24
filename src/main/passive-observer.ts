@@ -14,6 +14,30 @@ export class PassiveObserver {
   private frames = new Map<WebSocket, (event: {payload: string | Buffer}) => void>()
   private newestRequestAt=0
   private newestPanelRequestAt=0
+  private requestTimes = new WeakMap<Request, number>()
+  private paymentObservationUntil = 0
+  private paymentObservations = new Map<string, string>()
+  beginPaymentObservation(): void {
+    this.paymentObservationUntil = Date.now() + 20000
+    this.paymentObservations.clear()
+  }
+  private paymentNote(request: Request, state: string): void {
+    if (Date.now() > this.paymentObservationUntil || request.method() === 'GET' || request.method() === 'OPTIONS') return
+    // Capture shape only, including unrecognized endpoints, without storing
+    // hostnames, IDs, query strings, headers or request/response content.
+    const url = new URL(request.url())
+    const path = url.pathname.split('/').slice(0, 8).map(part => /^[a-z_]{0,32}$/.test(part) ? part : ':segment').join('/')
+    const origin = url.hostname === 'douyin.com' || url.hostname.endsWith('.douyin.com') ? '本站' : '其他域'
+    const key = `${request.method()} ${origin} ${path}`
+    this.paymentObservations.delete(key)
+    this.paymentObservations.set(key, state)
+    if (this.paymentObservations.size > 20) this.paymentObservations.delete(this.paymentObservations.keys().next().value!)
+  }
+  private request = (request: Request): void => {
+    if (!this.alive || this.signal.aborted) return
+    this.requestTimes.set(request, Date.now())
+    this.paymentNote(request, '已发出，尚无响应')
+  }
   // Endpoint paths and processing stages only: never retain query strings,
   // headers, request bodies, response payloads or account credentials here.
   private observations = new Map<string, string>()
@@ -24,10 +48,11 @@ export class PassiveObserver {
     if (this.observations.size > 8) this.observations.delete(this.observations.keys().next().value!)
   }
   identityDiagnostics(): string {
-    return [...this.observations].map(([path, state]) => `${path}: ${state}`).join('；') || '未记录到福袋请求响应'
+    return [...this.observations, ...this.paymentObservations].map(([path, state]) => `${path}: ${state}`).join('；') || '未记录到福袋请求响应'
   }
   constructor(private page: Page, private signal: AbortSignal, private reportRisk:(reason:string,source:string)=>void, private onOpportunity: (o: Opportunity) => void = () => {}) {
     page.on('response', this.response)
+    page.on('request', this.request)
     page.on('requestfailed', this.requestFailed)
     page.on('websocket', this.websocket)
     signal.addEventListener('abort', this.close, {once:true})
@@ -42,6 +67,7 @@ export class PassiveObserver {
   }
   private requestFailed = (request: Request): void => {
     if (!this.alive || this.signal.aborted) return
+    this.paymentNote(request, '请求失败')
     const url = new URL(request.url())
     if ((url.hostname === 'douyin.com' || url.hostname.endsWith('.douyin.com')) && /\/(?:lottery|gift\/send)\//.test(url.pathname))
       this.note(url.pathname, '请求失败，未收到完整响应')
@@ -56,10 +82,11 @@ export class PassiveObserver {
   }
   private async readResponse(response: Response): Promise<void> {
     if (!this.alive || this.signal.aborted) return
+    this.paymentNote(response.request(), `HTTP ${response.status()}，仅诊断、不授权付款成功`)
     const url = new URL(response.url())
     if (!(url.hostname === 'douyin.com' || url.hostname.endsWith('.douyin.com'))) return
     const lotteryPath = /\/lottery\//.test(url.pathname)
-    const paymentPath = /\/gift\/send\//.test(url.pathname)
+    const paymentPath = /^\/webcast\/gift\/send\/?$/.test(url.pathname)
     if (!url.pathname.startsWith('/webcast/')) {
       if (lotteryPath) this.note(url.pathname, '路径不在已支持范围内')
       return
@@ -93,13 +120,16 @@ export class PassiveObserver {
     const success = json.status_code === 0 || json.status_code === '0'
     const error = riskFromText(String(json.status_msg || json.message || json.prompt || ''))
     if (code === 95152 || (code !== 0 && error)) { this.reportRisk(error || `服务返回限制代码 ${code}`, 'response'); return }
-    if (/\/gift\/send\//.test(url.pathname)) {
-      const post=response.request().postData()||'', started=response.request().timing().startTime
+    if (paymentPath) {
+      const post=response.request().postData()||''
+      // A locally observed request event provides the dispatch boundary even
+      // when Playwright timing is unavailable. Never substitute response time.
+      const started=this.requestTimes.get(response.request()) ?? response.request().timing().startTime
       this.note(url.pathname, !/(?:^|&)gift_id=6937(?:&|$)/.test(post) ? '非已识别灯牌请求，不作为支付回执' :
         !Number.isFinite(started) || started <= 0 || Date.now()-started>=20000 ? '请求时间缺失或回执过期' :
         response.ok() && success ? '灯牌业务成功' :
         json.status_code !== null && json.status_code !== '' && Number.isFinite(code) && code !== 0 ? '灯牌业务失败' : '未获得明确业务结果')
-      if (/(?:^|&)gift_id=6937(?:&|$)/.test(post) && Date.now()-started<20000) {
+      if (/(?:^|&)gift_id=6937(?:&|$)/.test(post) && Number.isFinite(started) && started > 0 && Date.now() >= started && Date.now()-started<20000) {
         if(response.ok() && success)this.lastFanSuccess=started
         else if(json.status_code !== null && json.status_code !== '' && Number.isFinite(code) && code !== 0)this.lastFanFailure=started
       }
@@ -166,7 +196,7 @@ export class PassiveObserver {
   }
   close = (): void => {
     this.alive=false
-    this.page.off('response',this.response);this.page.off('requestfailed',this.requestFailed);this.page.off('websocket',this.websocket);this.page.off('close',this.close)
+    this.page.off('request',this.request);this.page.off('response',this.response);this.page.off('requestfailed',this.requestFailed);this.page.off('websocket',this.websocket);this.page.off('close',this.close)
     this.signal.removeEventListener('abort',this.close)
     for(const [ws,handler] of this.frames)ws.off('framereceived',handler)
     this.frames.clear()

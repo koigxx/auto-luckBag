@@ -223,6 +223,17 @@ export function parseOwnResult(text: string) {
     resultText: won ? '本人中奖结果已确认' : lost ? '本轮未中奖' : !notParticipated && participated ? '参与已确认' : '结果未知'
   } as const
 }
+/** Explicit task-row evidence only; disappearance, participation and history do not qualify. */
+export function visibleFanTaskCompleted(text: string): boolean {
+  let completed = false
+  for (const [, description, status] of text.matchAll(/([^\n]+?)\s*(未达成|已达成|未完成|已完成)(?=\s|$)/g)) {
+    if (/^(?:发送|发表)?评论|口令/.test(description.trim()) || /分享|转发/.test(description)) continue
+    if (!/粉丝团|灯牌/.test(description)) continue
+    if (status === '未达成' || status === '未完成') return false
+    completed = true
+  }
+  return completed
+}
 export function supplementVisibleTask(o: Opportunity, text: string, matchedPanel = false): Opportunity {
   const next = { ...o, unsupported: [...o.unsupported] }
   // Only an identity-bound panel may clear a task; never infer completion from a missing row.

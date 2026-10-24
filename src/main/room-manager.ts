@@ -15,10 +15,10 @@ export class RoomManager {
   private log:(id:string,message:string)=>void=()=>{}
   private result:(room:Room,result:FudaiGrabResult)=>void=()=>{}
   private removed:(id:string)=>void=()=>{}
-  private continuation:(o:Opportunity,room:{url:string;name:string})=>string|null=()=>null
+  private continuation:(o:Opportunity|null,room:{url:string;name:string})=>string|null=()=>null
   constructor(private browser:BrowserManager){onHalt(()=>this.closeAllRooms())}
   setCallbacks(update:(room:Room)=>void,log:(id:string,message:string)=>void,result?:(room:Room,result:FudaiGrabResult)=>void,removed?:(id:string)=>void):void{this.update=update;this.log=log;this.result=result||(()=>{});this.removed=removed||(()=>{})}
-  setContinuationCheck(fn:(o:Opportunity,room:{url:string;name:string})=>string|null):void{this.continuation=fn}
+  setContinuationCheck(fn:(o:Opportunity|null,room:{url:string;name:string})=>string|null):void{this.continuation=fn}
   async addRoom(url:string,name?:string,metadata:RoomMetadata={}):Promise<Room>{return this.create(url,name,metadata)}
   async addRoomFromPage(page:Page,url:string,name?:string,metadata:RoomMetadata={}):Promise<Room>{return this.create(url,name,metadata,page)}
   private async create(input:string,name:string|undefined,metadata:RoomMetadata,page?:Page):Promise<Room> {
@@ -33,7 +33,7 @@ export class RoomManager {
       // Install response/WS observers before navigation; takeover retains the verification observer.
       room.fudaiService=new FudaiService(room.page,url,{
         onUpdate:(o,rounds,phase)=>{if(!this.rooms.has(room.id))return;room.drawAt=o?.drawAt||null;room.fudaiCount=rounds;room.phase=phase;room.status=phase==='完成任务'?'grabbing':'monitoring'},
-        onResult:r=>this.result(room,r),onLog:m=>this.log(room.id,m),mayContinue:o=>this.continuation(o,room)
+        onResult:r=>this.result(room,r),onLog:m=>this.log(room.id,m),mayContinue:o=>this.continuation(o,room),mayWaitForNext:()=>this.continuation(null,room)
       },{signal,now:Date.now,repository,policy,paymentReason,reportRisk,perform,assertActive,canFinish:t=>sessionEngine.canFinish(t),getConfig:()=>store.store},metadata.observer,!!page)
       room.fudaiService.seed(metadata.opportunity)
       await room.fudaiService.installDomObserver()
