@@ -307,6 +307,32 @@ test('a ten-minute next round returns to the reservation pool without displacing
   await h.runner.stop();assert.equal(h.runner.getState().candidateCount,0)
 })
 
+test('reservation takeover keeps the actual navigation anchor and logs only accepted takeovers',async()=>{
+  for(const dispatchEvidence of [true,false]) {
+    const h=harness(),base=h.now(),urls=['12345678','87654321'].map(id=>'https://live.douyin.com/'+id)
+    const draws=[base+600000,base+722005]
+    h.discovery.scan=async()=>({rooms:urls.map(url=>({url,name:'fixture',reason:'fixture',countdownText:'',remainingSeconds:null})),riskDetected:false,riskReason:''})
+    h.discovery.verifyRoom=async(room,options)=>{
+      if(!options?.reserved || dispatchEvidence)h.repo.change(a=>a.navigations.push({url:room.url,at:h.now(),fresh:false}))
+      if(options?.reserved)h.advance(6974)
+      const index=urls.indexOf(room.url)
+      const result=verified(h,(draws[index]-h.now())/1000,{drawAt:draws[index],lotteryId:'fixture-'+index})
+      result.room!.url=room.url
+      return result
+    }
+    await h.runner.start();await pulse(h);await pulse(h)
+    await runFor(h,120000)
+    assert.equal(h.runner.getState().candidateCount,2)
+    await runFor(h,base+510000-h.now())
+    assert.equal(h.counts().entered,dispatchEvidence?1:0)
+    const decisions=h.repo.account().decisions.filter(d=>d.url===urls[0])
+    assert.equal(decisions.filter(d=>d.action==='takeover').length,dispatchEvidence?1:0)
+    if(!dispatchEvidence)assert.match(decisions.at(-1)!.reason,/冲突/,'old visit cannot stand in for this navigation')
+    assert.equal(h.runner.getState().candidates[0]?.url,urls[1])
+    await h.runner.stop()
+  }
+})
+
 test('free manual-participation bag with 40 seconds is taken over from the verification page', async () => {
   const h = harness()
   h.discovery.verifyRoom = async () => verified(h, 40)
@@ -617,5 +643,32 @@ test('planned rest resumes only after current checks, and restart is a fresh ses
   assert.equal(h.repo.account().session.phase, 'running')
   assert.notEqual(h.repo.account().session.startedAt, first)
   assert.equal(h.env.execution.signal.aborted, false)
+  await h.runner.stop()
+})
+
+
+test('finish request drops reservations, forbids continuation and produces a single report after room closes',async()=>{
+  const h=harness();await h.runner.start()
+  let active=true;h.rooms.getAllRooms=()=>active?[{} as Room]:[]
+  await h.runner.finishCurrent();assert.equal(h.runner.getState().status,'draining')
+  assert.match(h.continue(null,{url:'https://live.douyin.com/12345678',name:'x'})!,/停止/)
+  await h.runner.pulse();assert.equal(h.runner.getState().status,'draining')
+  active=false;await h.runner.pulse();assert.equal(h.runner.getState().status,'stopped')
+  assert.equal(h.repo.account().runs?.length,1);const reason=h.repo.account().runs![0].reason
+  await h.runner.stop('应用退出');assert.equal(h.repo.account().runs![0].reason,reason)
+})
+
+
+test('removing a queued round persists its skip and rejects stale queue commands',async()=>{
+  const h=harness();h.discovery.verifyRoom=async()=>verified(h,540)
+  await h.runner.start();await pulse(h);await pulse(h)
+  const candidate=h.runner.getState().candidates[0]
+  assert.ok(candidate)
+  assert.throws(()=>h.runner.removeCandidate(candidate.url,'stale'),/变化/)
+  h.runner.removeCandidate(candidate.url,candidate.lotteryId)
+  assert.equal(h.runner.getState().candidateCount,0)
+  assert.equal(h.repo.isSkipped(candidate.url,candidate.lotteryId),true)
+  await h.runner.stop();await h.runner.start();await pulse(h);await pulse(h)
+  assert.equal(h.runner.getState().candidateCount,0)
   await h.runner.stop()
 })

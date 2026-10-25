@@ -10,6 +10,8 @@ export type RoomStatus='loading'|'monitoring'|'grabbing'|'error'|'idle'
 export interface Room {id:string;url:string;name:string;page:Page|null;status:RoomStatus;fudaiCount:number;hasFanBadge:boolean;countdownText:string;remainingSeconds:number|null;drawAt:number|null;fudaiService:FudaiService|null;phase:string}
 export interface RoomMetadata {drawAt?:number|null;remainingSeconds?:number|null;countdownText?:string;opportunity?:Opportunity;observer?:PassiveObserver}
 export class RoomManager {
+  private unexpectedClose:()=>void=()=>{}
+  setUnexpectedClose(fn:()=>void):void{this.unexpectedClose=fn}
   private rooms=new Map<string,Room>()
   private update:(room:Room)=>void=()=>{}
   private log:(id:string,message:string)=>void=()=>{}
@@ -44,7 +46,7 @@ export class RoomManager {
   }
   async tick():Promise<void> {
     for(const room of this.rooms.values()) {
-      if(room.page?.isClosed()){await this.removeRoom(room.id);continue}
+      if(room.page?.isClosed()){this.unexpectedClose();await this.removeRoom(room.id);return}
       await room.fudaiService?.tick()
       if(room.fudaiService?.doneReason){
         const reason=room.fudaiService.doneReason

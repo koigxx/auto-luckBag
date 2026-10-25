@@ -18,6 +18,7 @@ export type { AppConfig, FudaiTypes, RunStats } from '../../../shared/config'
 
 export interface LogEntry {
   roomId: string
+  roomName?: string
   message: string
   time: number
 }
@@ -79,6 +80,10 @@ export interface AutoRunState {
   enterBeforeSeconds: number
   candidatePoolLimit: number
   candidates: {
+    lotteryId?:string
+    cost?:number|null
+    startAt?:number
+    taskAt?:number
     url: string
     name: string
     score: number

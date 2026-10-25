@@ -625,9 +625,12 @@ test('a returned page waits until the 45-second task window but starts earlier f
 test('a due reservation ends next-round waiting immediately after settlement', async () => {
   const p = await page(css + '<div class="lottery-dialog"><h3>福袋</h3>已参与，等待开奖</div>')
   const h = harness(p)
+  const updates:{o:Opportunity|null;rounds:number;status:string}[]=[]
+  ;(h.service as any).callbacks.onUpdate=(o:Opportunity|null,rounds:number,status:string)=>updates.push({o,rounds,status})
   try {
     await h.service.tick();await h.service.tick()
     h.advance(145000); await h.service.tick()
+    assert.deepEqual(updates.at(-1),{o:null,rounds:1,status:'等待下一轮福袋'},'settlement clears the old countdown before waiting for another round')
     ;(h.service as any).callbacks.mayWaitForNext=()=> '已有预约到时，结束等待新福袋并返房复验'
     await h.service.tick()
     assert.match(h.service.doneReason,/已有预约到时/)

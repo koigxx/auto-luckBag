@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useIpc } from './composables/useIpc'
 import { normalizeRoomUrl } from '../../shared/policy'
 import UiIcon from './components/UiIcon.vue'
@@ -11,6 +11,7 @@ import ActivityLog from './components/ActivityLog.vue'
 import './styles.css'
 
 const {
+  alerts,alertDestination,dismissAlert,finishCurrent,skipCandidate,
   ready,
   isLoggedIn,
   authState,
@@ -35,11 +36,13 @@ const {
   stopAutoRun,
   updateConfig,
   resetRunStats,
+  resetBudget,
   refreshInsights,
   retry
 } = useIpc()
 type View = 'dashboard' | 'settings' | 'library' | 'records' | 'logs'
 const view = ref<View>('dashboard')
+watch(alertDestination,kind=>{if(kind){view.value=kind==='login'?'dashboard':'records';alertDestination.value=''}})
 const dirty = ref(false)
 const manualOpen = ref(false)
 const manualUrl = ref('')
@@ -95,6 +98,7 @@ const attentionCount = computed(
     (insights.value?.payments.filter((p) => p.state === 'unresolved').length || 0) +
     (insights.value?.risks.filter((r) => r.resolvedAt === null).length || 0)
 )
+const recordAttentionCount=computed(()=>attentionCount.value+(insights.value?.rounds.filter(r=>r.result==='won'&&r.confirmedAt!==null&&r.prizeType!=='diamond'&&!r.claimed).length||0))
 async function switchLanguage(event: Event) {
   if (!(await updateConfig({ language: (event.target as HTMLSelectElement).value as 'zh-CN' | 'en-US' })))
     (event.target as HTMLSelectElement).value = language.value
@@ -185,7 +189,7 @@ async function recordAction(
             v-if="item.id === 'settings' && dirty"
             class="nav-dot"
             :aria-label="tr('未保存', 'Unsaved')"
-          /><b v-if="item.id === 'records' && attentionCount" class="nav-count">{{ attentionCount }}</b>
+          /><b v-if="item.id === 'records' && recordAttentionCount" class="nav-count">{{ recordAttentionCount }}</b>
         </button>
       </nav>
       <div class="sidebar-bottom">
@@ -296,6 +300,8 @@ async function recordAction(
             @login="login"
             @start="startAutoRun"
             @stop="stopAutoRun"
+            @finish="finishCurrent"
+            @skip="skipCandidate"
             @settings="view = 'settings'"
             @records="view = 'records'"
             @add="openManual"
@@ -307,6 +313,10 @@ async function recordAction(
             :running="running"
             :saving="!!busy.save"
             :on-save="updateConfig"
+            :on-reset-budget="resetBudget"
+            :resetting-budget="!!busy.budgetReset"
+            :budget="insights?.budget"
+            :can-reset-budget="isLoggedIn && !attentionCount && insights?.budget.hasActivity !== false"
             @dirty="dirty = $event"
           />
           <RecordsView
@@ -340,6 +350,11 @@ async function recordAction(
         </footer>
       </main>
     </div>
+    <aside v-if="alerts.length" class="alert-toast" role="status" aria-live="polite">
+      <div class="section-heading"><small>{{ tr('福袋助手', 'Lucky Bag') }} · {{ alerts.length }} {{ tr('条提醒','notifications') }}</small><button class="icon-button" aria-label="稍后查看提醒" @click="dismissAlert(alerts[0].id)"><UiIcon name="close" :size="16" /></button></div>
+      <strong>{{ alerts[0].title }}</strong><p>{{ alerts[0].message }}</p>
+      <button class="button small" @click="view=alerts[0].kind==='login'?'dashboard':'records';dismissAlert(alerts[0].id)">{{ alerts[0].kind==='login'?tr('返回登录','Sign in'):tr('查看记录','View records') }}</button>
+    </aside>
     <UiDialog
       :open="manualOpen"
       :title="tr('手动参与直播间', 'Join a room')"

@@ -53,6 +53,11 @@ export class SessionEngine {
       if(s.phase==='resume-check') return s
       const daily=s.activeByDay[dayKey(now,p.timezone)]||0
       if(!allowedNow(now,p) || daily>=p.dailyMinutes*60000) {s.phase='stopped';s.reason='允许时段或每日活跃额度已结束';s.nextResumeAt=null;return s}
+      if(s.finishRequested) {
+        s.phase='draining';s.reason='收尾后停止：不再接新轮'
+        if(!hasRoom || now>=(s.hardStopAt??Infinity)){s.phase='stopped';s.reason=hasRoom?'收尾到达硬截止，已停止':'本轮收尾完成，已停止';s.nextResumeAt=null}
+        return s
+      }
       if(now>=(s.drainAt??Infinity)) {s.phase='draining';s.reason='停止接新任务，等待本轮收尾'}
       if(now>=(s.hardStopAt??Infinity) || (s.phase==='draining'&&!hasRoom)) {
         const rng=seededRandom(s.seed^0x51f15e)
@@ -61,6 +66,7 @@ export class SessionEngine {
       return s
     })
   }
-  stop(reason='手动停止'): void {this.repo.change(a=>{a.session.phase=a.risks.some(r=>r.resolvedAt===null)?'blocked':'stopped';a.session.reason=reason;a.session.nextResumeAt=null;a.session.lastTickAt=this.repo.now()})}
+  requestFinish():void {this.repo.change(a=>{const s=a.session;if(['running','draining'].includes(s.phase)){s.finishRequested=true;s.phase='draining';s.nextResumeAt=null;s.reason='收尾后停止：不再接新轮'}})}
+  stop(reason='手动停止'): void {this.repo.change(a=>{if(['stopped','blocked'].includes(a.session.phase))return;a.session.phase=a.risks.some(r=>r.resolvedAt===null)?'blocked':'stopped';a.session.reason=reason;a.session.nextResumeAt=null;a.session.lastTickAt=this.repo.now()})}
   canFinish(drawAt: number, bufferMs=25000): boolean {const s=this.repo.account().session;return s.phase==='running'&&drawAt+bufferMs<=(s.hardStopAt??0)}
 }

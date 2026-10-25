@@ -43,6 +43,11 @@ async function main() {
     assert.equal(config.candidatePoolLimit, 5)
     assert.equal((await page.evaluate(() => window.api.autoRun.status())).running, false)
     assert.equal((await page.evaluate(() => window.api.auth.status())).isLoggedIn, false)
+    const runtimePath=path.join(profile,'runtime-v2.json')
+    const runtimeBefore=fs.readFileSync(runtimePath,'utf8')
+    const duplicate=require('node:child_process').spawnSync(require('electron'),[bootstrap],{env,timeout:15000,windowsHide:true,encoding:'utf8'})
+    assert.equal(duplicate.status,0,`Second instance should exit: ${duplicate.stderr}`)
+    assert.equal(fs.readFileSync(runtimePath,'utf8'),runtimeBefore,'duplicate instance must not recover or rewrite the ledger')
     const backup = path.join(profile, 'config.json.before-runtime-v2.bak')
     assert.ok(fs.existsSync(backup))
     const original = JSON.parse(fs.readFileSync(backup, 'utf8'))
@@ -105,6 +110,7 @@ async function main() {
     await page.waitForTimeout(100)
     assert.deepEqual(errors, [])
     await require('./ui-smoke.cjs')(config, output)
+    await require('./alerts-smoke.cjs')(output)
     console.log(
       'Electron smoke passed: isolated profile, legacy backup/restore, settings form save/reload/persistence, IPC validation, stopped-on-start, Vue render.'
     )

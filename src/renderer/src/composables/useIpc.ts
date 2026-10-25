@@ -1,5 +1,6 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import type { RoomInfo, AppConfig, LogEntry, Stats, RunStats, AutoRunState } from '../types'
+import {sortAlerts} from '../../../shared/review'
 import type { Insights } from '../../../shared/insights'
 import type { AuthState } from '../../../shared/auth'
 
@@ -15,6 +16,8 @@ export function useIpc() {
   const autoRunState = ref<AutoRunState | null>(null)
   const insights = ref<Insights | null>(null)
   const busy = ref<Record<string, boolean>>({})
+  const alerts=ref<import('../../../shared/policy').UserAlert[]>([])
+  const alertDestination=ref('')
   const notice = ref<{ text: string; kind: 'success' | 'error' | 'info' } | null>(null)
   const unsubscribers: (() => void)[] = []
   let poll: ReturnType<typeof setInterval> | undefined
@@ -63,6 +66,7 @@ export function useIpc() {
     refreshing = true
     try {
       insights.value = isLoggedIn.value ? await window.api.insights.get() : null
+      if(insights.value?.alerts)alerts.value=sortAlerts([...alerts.value.filter(n=>n.kind==='login'),...insights.value.alerts])
     } finally {
       refreshing = false
     }
@@ -99,6 +103,8 @@ export function useIpc() {
   }
   onMounted(async () => {
     unsubscribers.push(
+      window.api.on('alerts:update',(items:import('../../../shared/policy').UserAlert[])=>{alerts.value=items}),
+      window.api.on('navigate:records',(kind:string)=>{alertDestination.value=kind}),
       window.api.on('room:update', (room: RoomInfo) => {
         upsertRoom(room)
         scheduleRefresh()
@@ -195,6 +201,15 @@ export function useIpc() {
       notify(tr('已停止，后续自动恢复已取消。', 'Stopped. Scheduled resume is cancelled.'))
       return true
     })
+  const finishCurrent=()=>action('finish',async()=>{
+    const result=await window.api.autoRun.finish();requireSuccess(result);autoRunState.value=result.state;return true
+  })
+  const skipCandidate=(url:string,id:string,today:boolean)=>action(`candidate:${url}`,async()=>{
+    const result=await window.api.autoRun.skip(url,id,today);requireSuccess(result);autoRunState.value=result.state;return true
+  })
+  const dismissAlert=(id:string)=>action('dismissAlert',async()=>{
+    requireSuccess(await window.api.alerts.dismiss(id));alerts.value=alerts.value.filter(n=>n.id!==id);return true
+  })
   const updateConfig = (partial: Partial<AppConfig>) =>
     action('save', async () => {
       const result = await window.api.config.set(partial)
@@ -212,7 +227,18 @@ export function useIpc() {
       )
       return true
     })
+  const resetBudget = () => action('budgetReset', async () => {
+    const result = await window.api.config.resetDiamondUsed()
+    requireSuccess(result)
+    config.value = result.config || await window.api.config.get()
+    await Promise.all([refreshStats(), refreshInsights()])
+    notify(result.changed === false
+      ? tr('当前预算轮次尚无参与或支付记录，无需重复重置。', 'This budget cycle has no activity yet; no reset is needed.')
+      : tr('新一轮预算已开始，历史账单已保留。', 'New budget cycle started. Payment history preserved.'))
+    return true
+  })
   return {
+    alerts,alertDestination,dismissAlert,finishCurrent,skipCandidate,
     ready,
     isLoggedIn,
     authState,
@@ -237,6 +263,7 @@ export function useIpc() {
     stopAutoRun,
     updateConfig,
     resetRunStats,
+    resetBudget,
     refreshInsights,
     retry: () => action('initialize', refreshAccount)
   }

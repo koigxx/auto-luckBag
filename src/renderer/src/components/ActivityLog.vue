@@ -10,11 +10,13 @@ const autoScroll = ref(true)
 const container = ref<HTMLElement | null>(null)
 const filtered = computed(() =>
   props.logs.filter((log) =>
-    `${log.message} ${source(log.roomId)}`.toLowerCase().includes(search.value.toLowerCase())
+    `${log.message} ${source(log)}`.toLowerCase().includes(search.value.toLowerCase())
   )
 )
-function source(id: string) {
+function source(log: LogEntry) {
+  const id = log.roomId
   return (
+    log.roomName ||
     props.rooms.find((room) => room.id === id)?.name ||
     (
       {
@@ -86,7 +88,7 @@ watch(
       </div>
       <div v-for="(log, index) in filtered" :key="`${log.time}-${index}`" class="log-line">
         <time>{{ new Date(log.time).toLocaleTimeString(language, { hour12: false }) }}</time
-        ><span class="log-source">{{ source(log.roomId) }}</span>
+        ><span class="log-source">{{ source(log) }}</span>
         <p>{{ log.message }}</p>
       </div>
     </div>

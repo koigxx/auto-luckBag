@@ -2,14 +2,20 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import type { AppConfig } from '../types'
 import type { Policy } from '../../../shared/policy'
+import { participationPreset, type ParticipationPreset } from '../../../shared/config'
 import { validateConfigPatch } from '../../../shared/config-validation'
 import UiIcon from './UiIcon.vue'
+import UiDialog from './UiDialog.vue'
 
 const props = defineProps<{
   config: AppConfig
   running: boolean
   saving: boolean
   onSave: (value: Partial<AppConfig>) => Promise<boolean | null>
+  onResetBudget: () => Promise<boolean | null>
+  resettingBudget: boolean
+  canResetBudget: boolean
+  budget?: import('../../../shared/insights').Insights['budget']
 }>()
 const emit = defineEmits<{ dirty: [value: boolean] }>()
 const tr = (zh: string, en: string) => (props.config.language === 'en-US' ? en : zh)
@@ -37,11 +43,17 @@ const editable = (c: AppConfig) =>
     | 'policy'
   >
 const draft = ref(editable(props.config))
+function applyPreset(preset:ParticipationPreset){if(props.running||props.saving)return;Object.assign(draft.value,participationPreset(draft.value,preset));saved.value=false}
 const baseline = ref(JSON.stringify(draft.value))
 const dirty = computed(() => JSON.stringify(draft.value) !== baseline.value)
 const section = ref('preferences')
 const error = ref('')
 const saved = ref(false)
+const resetBudgetOpen = ref(false)
+async function confirmBudgetReset() {
+  if (props.running || dirty.value || !props.canResetBudget || props.resettingBudget) return
+  if (await props.onResetBudget()) resetBudgetOpen.value = false
+}
 const groups = [
   { id: 'preferences', icon: 'gift', zh: '参与偏好', en: 'Participation' },
   { id: 'budget', icon: 'diamond', zh: '支出与粉丝团', en: 'Spending & membership' },
@@ -312,6 +324,7 @@ async function save() {
 </script>
 
 <template>
+  <div class="settings-view">
   <form class="settings-layout surface" novalidate @submit.prevent="save">
     <nav class="settings-nav" :aria-label="tr('设置分组', 'Settings groups')">
       <button
@@ -340,6 +353,9 @@ async function save() {
       </div>
       <fieldset :disabled="running || saving">
         <section v-show="section === 'preferences'" class="settings-section">
+          <h3>{{tr('快捷方案','Quick presets')}}</h3>
+          <div class="preset-options"><button v-for="item in [{id:'existing',label:'仅已有资格'},{id:'physical',label:'实物优先'},{id:'diamond',label:'钻石优先'},{id:'balanced',label:'全部均衡'}]" :key="item.id" type="button" class="button small" @click="applyPreset(item.id as ParticipationPreset)">{{item.label}}</button></div>
+          <p class="microcopy">{{tr('方案仅调整参与偏好，保留现有预算、付费限制和运行节奏。检查后保存生效。','Presets change preferences only. Spending limits and pacing stay as configured. Review and save to apply.')}}</p>
           <h2>{{ tr('先选你更关注的机会', 'Choose what matters to you') }}</h2>
           <p class="section-description">
             {{
@@ -428,6 +444,15 @@ async function save() {
               /><span>{{ tr('钻', 'diamonds') }}</span>
             </div></label
           >
+          <div class="quiet-note">
+            <span>{{ tr('本轮已用', 'Cycle spent') }} {{ budget?.spent ?? config.diamondUsed }} ·
+              {{ tr('累计支出', 'Lifetime spent') }} {{ budget?.lifetimeSpent ?? budget?.spent ?? config.diamondUsed }}</span>
+            <button type="button" class="button" :disabled="running || saving || dirty || resettingBudget || !canResetBudget" @click="resetBudgetOpen = true">
+              {{ tr('重置本轮预算', 'Reset cycle budget') }}
+            </button>
+          </div>
+          <p v-if="budget?.hasActivity === false" class="microcopy">{{ tr('当前预算轮次尚无参与或支付记录，无需重复重置。', 'This budget cycle has no activity yet; no reset is needed.') }}</p>
+          <p class="microcopy">{{ tr('停止运行并保存设置后可重置。本轮及每日已用归零，历史账单、主播累计和新开团数量限制保留；未决支付需先核对。', 'Stop and save settings before resetting. Cycle and daily spending reset; history, host caps and new-club counts remain. Reconcile pending payments first.') }}</p>
           <label class="field-label"
             >{{ tr('粉丝团付费策略', 'Membership spending policy')
             }}<select v-model="draft.policy.membership">
@@ -636,4 +661,13 @@ async function save() {
       </div>
     </footer>
   </form>
+  <UiDialog :open="resetBudgetOpen" :title="tr('开始新一轮预算', 'Start a new budget cycle')" :busy="resettingBudget" @close="resetBudgetOpen = false">
+    <p>{{ tr('重置后，本轮已用归零，基础可用额度恢复为', 'Cycle spending will reset and base funds will return to') }} {{ config.diamondBudget }} {{ tr('钻。历史支出和中奖记录保留，旧轮奖励不再计入新轮预算。', 'diamonds. Payment and award history stay; earlier awards do not fund this cycle.') }}</p>
+    <p>{{ tr('每日已用同时归零，每日支出额度恢复为', 'Daily spending also resets, restoring the daily allowance to') }} {{ config.policy.dailySpend }} {{ tr('钻。单主播累计上限和每日新开团数量不重置。', 'diamonds. Host spending and daily new-club counts do not reset.') }}</p>
+    <template #footer>
+      <button type="button" class="button" :disabled="resettingBudget" @click="resetBudgetOpen = false">{{ tr('取消', 'Cancel') }}</button>
+      <button type="button" class="button primary" :disabled="running || dirty || resettingBudget || !canResetBudget" @click="confirmBudgetReset">{{ resettingBudget ? tr('正在重置…', 'Resetting…') : tr('确认重置预算', 'Confirm budget reset') }}</button>
+    </template>
+  </UiDialog>
+  </div>
 </template>

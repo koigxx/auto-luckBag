@@ -69,3 +69,15 @@ export const defaults: AppConfig = {
     lastStoppedAt: null
   }
 }
+
+export type ParticipationPreset='existing'|'physical'|'diamond'|'balanced'
+// Presets only change participation preferences; never increase money or pace limits.
+export function participationPreset(config:Pick<AppConfig,'policy'|'fudaiTypes'>,preset:ParticipationPreset):Pick<AppConfig,'policy'|'fudaiTypes'> {
+  const policy={...config.policy},fudaiTypes={...config.fudaiTypes}
+  if(preset==='existing')policy.membership='existing'
+  else {
+    policy.objective=preset==='balanced'?'opportunity':preset
+    fudaiTypes.all=preset==='balanced';fudaiTypes.physical=preset==='physical';fudaiTypes.diamond=preset==='diamond'
+  }
+  return {policy,fudaiTypes}
+}

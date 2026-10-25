@@ -1,4 +1,4 @@
-import { ipcMain,BrowserWindow,dialog } from 'electron'
+import { ipcMain,BrowserWindow,dialog,shell } from 'electron'
 import fs from 'fs'
 import { BrowserManager } from './browser-manager'
 import { AuthService } from './auth-service'
@@ -10,11 +10,13 @@ import { StatsService } from './stats-service'
 import { AutoRunner } from './auto-runner'
 import { currentBudget,policy,repository,setExecutionLogger } from './runtime'
 import { validateConfigPatch } from '../shared/config-validation'
+import { normalizeRoomUrl } from '../shared/policy'
+import { runReports,budgetCycles } from '../shared/review'
 import { dayKey } from './runtime-repository'
 
 export function setupIpcHandlers(win:BrowserWindow,_browser:BrowserManager,auth:AuthService,rooms:RoomManager,discovery:DiscoveryService,stats:StatsService,runner:AutoRunner):void {
   const send=(channel:string,data:unknown)=>{if(!win.isDestroyed())win.webContents.send(channel,data)}
-  const log=(roomId:string,message:string)=>send('log:add',{roomId,message,time:Date.now()})
+  const log=(roomId:string,message:string)=>send('log:add',{roomId,roomName:rooms.getRoom(roomId)?.name,message,time:Date.now()})
   setExecutionLogger(message=>log('auto',message))
   rooms.setCallbacks(r=>send('room:update',rooms.getRoomPublicInfo(r.id)),log,(_room,result)=>stats.recordParticipation(result),id=>send('room:removed',id))
   discovery.setLogger(m=>log('discover',m));stats.setOnUpdate(s=>send('run-stats:update',s));runner.setCallbacks(m=>log('auto',m),s=>send('auto-run:update',s))
@@ -36,7 +38,12 @@ export function setupIpcHandlers(win:BrowserWindow,_browser:BrowserManager,auth:
     if(patch.language)setupAppMenu(win)
     return {success:true,config:config()}
   }))
-  ipcMain.handle('config:resetDiamondUsed',safe(()=>{throw new Error('支出账本不可清零；如有未决支付，请核对后处理')}))
+  ipcMain.handle('config:resetDiamondUsed',safe(()=>{
+    if(runner.getState().running || rooms.getAllRooms().length) throw new Error('请先停止计划及所有房间任务')
+    const changed=repository.resetBudget()
+    stats.publish()
+    return {success:true,changed,config:config(),budget:currentBudget()}
+  }))
   ipcMain.handle('stats:get',()=>{
     const budget=repository.read().activeAccount?currentBudget():{effective:store.get('diamondBudget'),spent:0,reserved:0,remaining:store.get('diamondBudget')}
     return {totalFudai:stats.getStats().participated,activeRooms:rooms.getAllRooms().length,diamondBudget:budget.effective,diamondUsed:budget.spent,diamondReserved:budget.reserved,diamondRemaining:budget.remaining}
@@ -45,12 +52,27 @@ export function setupIpcHandlers(win:BrowserWindow,_browser:BrowserManager,auth:
   ipcMain.handle('runStats:reset',()=>stats.reset())
   ipcMain.handle('autoRun:start',safe(async(options={})=>({success:true,state:await runner.start(options)})))
   ipcMain.handle('autoRun:stop',safe(async()=>({success:true,state:await runner.stop()})))
+  ipcMain.handle('autoRun:finish',safe(async()=>({success:true,state:await runner.finishCurrent()})))
+  ipcMain.handle('autoRun:skip',safe((url:string,id:string,today:boolean)=>{
+    if(typeof url!=='string'||typeof id!=='string'||typeof today!=='boolean')throw new Error('无效候选操作')
+    runner.removeCandidate(url,id,today);return {success:true,state:runner.getState()}
+  }))
+  ipcMain.handle('insights:claim',safe((key:string,claimed:boolean)=>{
+    if(typeof key!=='string'||typeof claimed!=='boolean')throw new Error('无效领取操作')
+    repository.setClaim(key,claimed);return {success:true}
+  }))
+  ipcMain.handle('insights:openClaim',safe(async(key:string)=>{
+    const r=repository.account().rounds[key]
+    if(!r||r.result!=='won'||r.confirmedAt===null||r.prizeType==='diamond')throw new Error('没有可处理的中奖记录')
+    await shell.openExternal(normalizeRoomUrl(r.roomUrl));return {success:true}
+  }))
+  ipcMain.handle('alerts:dismiss',safe((id:string)=>{repository.dismissAlert(id);return {success:true}}))
   ipcMain.handle('autoRun:status',()=>runner.getState())
   ipcMain.handle('insights:get',()=>{
     if(!repository.read().activeAccount)return null
     const a=repository.account(),records=Object.values(a.rounds),payments=Object.values(a.payments),confirmed=records.filter(r=>r.confirmedAt)
     const paid=payments.filter(p=>p.state==='confirmed'),reused=confirmed.filter(r=>paid.some(p=>p.roomUrl===r.roomUrl&&p.at<r.createdAt)&&!payments.some(p=>p.roundKey===r.key&&p.state!=='failed'))
-    return {rooms:Object.values(a.rooms),rounds:records.slice(-300).reverse(),payments:payments.slice(-300).reverse(),risks:a.risks.slice(-100),decisions:a.decisions.slice(-100).reverse(),session:a.session,budget:currentBudget(),legacy:a.legacyStats,
+    return {reports:runReports(a),cycles:budgetCycles(a),alerts:a.alerts||[],rooms:Object.values(a.rooms),rounds:records.reverse(),payments:payments.reverse(),risks:a.risks,decisions:a.decisions.slice().reverse(),session:a.session,budget:currentBudget(),legacy:a.legacyStats,
       metrics:{visits:Object.values(a.rooms).reduce((s,r)=>s+r.visits.length,0),confirmed:confirmed.length,
         reuse:confirmed.length?reused.length/confirmed.length:0,
         reusePerPayment:paid.length?reused.length/paid.length:0,
@@ -76,10 +98,11 @@ export function setupIpcHandlers(win:BrowserWindow,_browser:BrowserManager,auth:
     if(result.canceled||!result.filePath)return {success:false,error:'已取消导出'}
     const a=repository.account(),urls=Object.keys(a.rooms),alias=(url:string)=>`room-${urls.indexOf(url)+1}`
     // An allowlist export excludes cookies, account hashes, names, raw URLs, comments and page text.
-    const data={version:2,exportedAt:Date.now(),policy:policy(),budget:currentBudget(),
+    const data={version:2,exportedAt:Date.now(),policy:policy(),budget:currentBudget(),cycles:budgetCycles(a),
+      reports:runReports(a).map(r=>({startedAt:r.startedAt,endedAt:r.endedAt,activeMs:r.activeMs,budgetCycle:r.budgetCycle,confirmed:r.confirmed,won:r.won,lost:r.lost,unknown:r.unknown,pending:r.pending,spent:r.spent,reserved:r.reserved})),
       rooms:Object.values(a.rooms).map(r=>({id:alias(r.url),favorite:r.favorite,blocked:r.blocked,membership:r.membership,visits:r.visits})),
       rounds:Object.values(a.rounds).map(r=>({room:alias(r.roomUrl),createdAt:r.createdAt,drawAt:r.drawAt,submittedAt:r.submittedAt,confirmedAt:r.confirmedAt,result:r.result,prizeType:r.prizeType,diamondAmount:r.diamondAmount,taskSeconds:r.taskSeconds})),
-      payments:Object.values(a.payments).map(p=>({room:alias(p.roomUrl),at:p.at,cost:p.cost,state:p.state,newClub:p.newClub})),
+      payments:Object.values(a.payments).map(p=>({room:alias(p.roomUrl),budgetCycle:p.budgetCycle??0,at:p.at,cost:p.cost,state:p.state,newClub:p.newClub})),
       decisions:a.decisions.map(d=>({room:alias(d.url),at:d.at,action:d.action,score:d.score,probability:d.probability,seed:d.seed,
         evidence:d.snapshot?{version:d.snapshot.version,leadSeconds:d.snapshot.leadSeconds,utility:d.snapshot.utility,mode:d.snapshot.mode,sampleCount:d.snapshot.sampleCount,
           source:d.snapshot.opportunity.source,observedAt:d.snapshot.opportunity.observedAt,drawAt:d.snapshot.opportunity.drawAt,cost:d.snapshot.opportunity.cost,

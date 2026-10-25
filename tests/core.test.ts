@@ -12,6 +12,52 @@ import { evaluate, bestSchedule, rankHistory, taskLead, projectedParticipants } 
 
 const url = 'https://live.douyin.com/12345678',
   url2 = 'https://live.douyin.com/87654321'
+test('budget reset restores total and daily allowances but preserves history and idempotency', () => {
+  const h=setup(),p={...DEFAULT_POLICY,paymentLimit:50,anchorSpend:100,dailySpend:50}
+  const payment=h.repo.reserve(url,'old',30,50,false,p)
+  h.repo.payment(payment.id,'confirmed')
+  h.repo.record(url,'old',{confirmedAt:h.now(),result:'won',prizeType:'diamond',diamondAmount:10})
+  assert.equal(h.repo.budget(50,false,p).remaining,20)
+  h.repo.resetBudget()
+  const b=h.repo.budget(50,true,p)
+  assert.equal(b.spent,0);assert.equal(b.remaining,50);assert.equal(b.lifetimeSpent,30)
+  assert.equal(b.dailyRemaining,50);assert.equal(b.credit,0)
+  assert.equal(Object.values(h.repo.account().payments).length,1)
+  assert.equal(h.repo.stats().participated,1)
+  assert.throws(()=>h.repo.reserve(url,'old',1,50,false,p),/已有支付/)
+  assert.throws(()=>h.repo.reserve(url,'too-much',51,50,false,p),/单次支付上限/)
+  h.repo.record(url,'old',{diamondAmount:20})
+  assert.equal(h.repo.budget(50,true,p).credit,0,'late old award details do not replenish new cycle')
+  const next=h.repo.reserve(url,'new',10,50,false,p);h.repo.payment(next.id,'confirmed')
+  assert.equal(h.repo.budget(50,false,p).remaining,40)
+  assert.equal(h.repo.budget(50,false,p).dailyRemaining,40)
+  assert.match(h.repo.canPay(url,1,50,false,{...p,anchorSpend:40})!,/主播支出/)
+  h.repo.recover();h.repo.bind('account-a',{spent:99,stats:{},rooms:[]})
+  assert.equal(h.repo.budget(50,false,p).spent,10)
+  h.repo.bind('account-b',{spent:99,stats:{},rooms:[]})
+  assert.equal(h.repo.budget(50,false,p).cycle,0)
+  assert.equal(h.repo.budget(50,false,p).spent,0)
+})
+
+test('budget reset rejects active plans, pending money and risk, and migrates legacy spending without deletion',()=>{
+  for(const state of ['reserved','submitted','unresolved'] as const){
+    const h=setup();const pay=h.repo.reserve(url,'pending',1,50,false,DEFAULT_POLICY)
+    h.repo.payment(pay.id,state)
+    assert.throws(()=>h.repo.resetBudget(),/预留或未决/)
+    assert.equal(h.repo.budget(50,false,DEFAULT_POLICY).reserved,1)
+  }
+  for(const phase of ['running','draining','resting','resume-check','blocked'] as const){
+    const h=setup();h.repo.change(a=>{a.session.phase=phase})
+    assert.throws(()=>h.repo.resetBudget(),/停止运行/)
+  }
+  const h=setup(30)
+  h.repo.resetBudget()
+  assert.equal(h.repo.account().openingSpent,30)
+  assert.equal(h.repo.budget(50,false,DEFAULT_POLICY).remaining,50)
+  assert.equal(h.repo.budget(50,false,DEFAULT_POLICY).lifetimeSpent,30)
+  h.repo.risk('fixture','fixture');h.repo.change(a=>{a.session.phase='stopped'})
+  assert.throws(()=>h.repo.resetBudget(),/风险/)
+})
 function setup(spent = 0) {
   let data = emptyRuntime(),
     now = Date.UTC(2026, 9, 22, 2)
@@ -36,6 +82,24 @@ function setup(spent = 0) {
     now: () => now
   }
 }
+
+test('empty budget resets are idempotent across reloads and preserve late old-cycle results', () => {
+  const h=setup()
+  assert.equal(h.repo.resetBudget(),false)
+  assert.equal(h.repo.budget(50,true,DEFAULT_POLICY).hasActivity,false)
+  h.repo.record(url,'free',{confirmedAt:h.now(),result:'lost'})
+  assert.equal(h.repo.resetBudget(),true,'a used cycle can be archived even without spending')
+  const before=h.repo.read()
+  assert.equal(h.repo.resetBudget(),false)
+  assert.deepEqual(h.repo.read(),before)
+  h.repo.recover()
+  h.repo.bind('account-a',{spent:0,stats:{},rooms:[]})
+  h.repo.record(url,'free',{result:'won',prizeType:'diamond',diamondAmount:10})
+  assert.equal(h.repo.resetBudget(),false,'late old results do not make the empty cycle active')
+  assert.equal(h.repo.budget(50,true,DEFAULT_POLICY).credit,0)
+  assert.equal(h.repo.account().budgetCycle,1)
+  assert.equal(h.repo.account().decisions.filter(d=>d.action==='budget-reset').length,1)
+})
 function opportunity(now: number, patch: Partial<Opportunity> = {}): Opportunity {
   return {
     lotteryId: 'round-1',
@@ -547,6 +611,16 @@ test('candidate combination reserves both occupancy and navigation gaps',()=>{
   const {now}=setup(),base=evaluate(opportunity(now()),p,now(),undefined,[],true)
   const items=[0,90000,180000].map((startAt,id)=>({id,evaluation:{...base,startAt,endAt:startAt+70000}}))
   assert.deepEqual(bestSchedule(items,5,120).map(r=>r.id),[0,2])
+})
+
+test('retained-page navigation uses dispatch time without relaxing occupancy or real spacing conflicts',()=>{
+  const {now}=setup(),base=evaluate(opportunity(now()),p,now(),undefined,[],true)
+  const a={id:'current',evaluation:{...base,startAt:6974,navigationAt:0,endAt:114487,utility:1}}
+  const b={id:'reserved',evaluation:{...base,startAt:122005,endAt:237005,utility:2}}
+  assert.deepEqual(bestSchedule([a,b],5,120).map(x=>x.id),['current','reserved'])
+  assert.deepEqual(bestSchedule([{...a,evaluation:{...a.evaluation,navigationAt:undefined}},b],5,120).map(x=>x.id),['reserved'])
+  assert.deepEqual(bestSchedule([{...a,evaluation:{...a.evaluation,navigationAt:3000}},b],5,120).map(x=>x.id),['reserved'])
+  assert.deepEqual(bestSchedule([{...a,evaluation:{...a.evaluation,endAt:123000}},b],5,120).map(x=>x.id),['reserved'])
 })
 test('scheduling maximizes total utility among compatible occupancy intervals', () => {
   const { now } = setup(),

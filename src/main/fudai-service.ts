@@ -195,6 +195,7 @@ export class FudaiService {
           this.settled.add(current.lotteryId)
           this.rounds++
           this.current = null
+          this.callbacks.onUpdate(null, this.rounds, '等待下一轮福袋')
           this.waitingSince = now
           this.sent.clear()
           this.actionWaits.clear()

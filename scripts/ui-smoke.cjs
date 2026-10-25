@@ -111,6 +111,7 @@ module.exports = async function verifyUI(config, output) {
         fixture.calls[key] = (fixture.calls[key] || 0) + 1
       }
       const emit = (key, value) => (callbacks[key] || []).forEach((fn) => fn(copy(value)))
+      fixture.emit = emit
       fixture.phase = (phase) => {
         if (['stopped', 'blocked'].includes(phase)) {
           fixture.state.candidates = []
@@ -243,6 +244,12 @@ module.exports = async function verifyUI(config, output) {
         },
         config: {
           get: async () => copy(fixture.config),
+          resetDiamondUsed: async () => {
+            count('budgetReset')
+            fixture.config.diamondUsed=0
+            Object.assign(fixture.insights.budget,{spent:0,lifetimeSpent:7,hasActivity:false,credit:0,remaining:fixture.config.diamondBudget,dailyRemaining:fixture.config.policy.dailySpend})
+            return {success:true,config:copy(fixture.config)}
+          },
           set: async (patch) => {
             // Match the IPC boundary: JSON copying would silently hide Vue Proxy errors.
             const serialized = structuredClone(patch)
@@ -297,7 +304,10 @@ module.exports = async function verifyUI(config, output) {
             return { success: true }
           }
         },
+        alerts:{dismiss:async(id)=>{count('dismissAlert');fixture.insights.alerts=(fixture.insights.alerts||[]).filter(n=>n.id!==id);emit('alerts:update',fixture.insights.alerts);return {success:true}}},
         autoRun: {
+          finish:async()=>{count('finish');fixture.phase('draining');fixture.state.session.finishRequested=true;return {success:true,state:copy(fixture.state)}},
+          skip:async(url,id,today)=>{count(today?'skipToday':'skipRound');fixture.state.candidates=fixture.state.candidates.filter(c=>c.url!==url);return {success:true,state:copy(fixture.state)}},
           status: async () => copy(fixture.state),
           start: async () => {
             count('start')
@@ -318,6 +328,8 @@ module.exports = async function verifyUI(config, output) {
           }
         },
         insights: {
+          openClaim:async()=>{count('openClaim');return {success:true}},
+          claim:async(key,claimed)=>{count('claim');fixture.insights.rounds.find(r=>r.key===key).claimed=claimed;return {success:true}},
           get: async () => (fixture.loggedIn ? copy(fixture.insights) : null),
           room: async (roomUrl, patch) => {
             if (fixture.rejectRoomChange) return { success: false, error: '模拟房间设置保存失败' }
@@ -349,6 +361,7 @@ module.exports = async function verifyUI(config, output) {
       }
     }, config)
     const page = await context.newPage()
+    page.setDefaultTimeout(12000)
     page.on('pageerror', (error) => errors.push(error.message))
     const nav = (name) =>
       page.getByRole('navigation', { name: '主导航' }).getByRole('button', { name, exact: true })
@@ -416,10 +429,24 @@ module.exports = async function verifyUI(config, output) {
     )
     check((await page.evaluate(() => window.__fixture.calls.start)) === 1, 'one start request')
     await page.evaluate(() => window.__fixture.releaseStart())
-    await page.getByRole('button', { name: '停止运行', exact: true }).waitFor()
+    await page.getByRole('button', { name: '立即停止', exact: true }).waitFor()
     await page.evaluate(() => window.__fixture.populate())
     await page.getByText('示例生活好物直播间', { exact: true }).waitFor()
     await page.screenshot({ path: path.join(output, 'ui-overview-running.png'), fullPage: true })
+    await page.evaluate(()=>{
+      const f=window.__fixture
+      f.emit('log:add',{roomId:f.rooms[0].id,roomName:'离房后仍可搜索的房间',message:'离线结算记录',time:Date.now()})
+      f.savedRooms=f.rooms
+      f.rooms.forEach(r=>f.emit('room:removed',r.id));f.rooms=[]
+      f.state.waitingReason='等待候选预约进房，暂不验证其他房间'
+      f.phase('running')
+    })
+    check(await page.getByRole('heading',{name:'等待候选预约进房，暂不验证其他房间',exact:true}).isVisible(),'empty room shows reservation wait rather than exploration')
+    await page.evaluate(()=>window.__fixture.phase('resting'))
+    check(await page.locator('.empty-state').getByRole('heading',{name:'计划休息中',exact:true}).isVisible(),'empty room shows planned rest')
+    await page.evaluate(()=>{
+      const f=window.__fixture;f.rooms=f.savedRooms;f.rooms.forEach(r=>f.emit('room:update',r));f.state.waitingReason='';f.phase('running')
+    })
     await nav('策略设置').click()
     check(
       await page.getByRole('radio', { name: /参与机会/ }).isDisabled(),
@@ -442,7 +469,7 @@ module.exports = async function verifyUI(config, output) {
       await page.getByText('10:00', { exact: true }).isVisible(),
       'resume countdown uses main-process value'
     )
-    await page.getByRole('button', { name: '停止运行', exact: true }).click()
+    await page.getByRole('button', { name: '立即停止', exact: true }).click()
     check(
       await page.getByRole('button', { name: '正在停止…', exact: true }).isDisabled(),
       'stop waits for acknowledgement'
@@ -527,6 +554,8 @@ module.exports = async function verifyUI(config, output) {
     )
     await page.screenshot({ path: path.join(output, 'ui-records-review.png'), fullPage: true })
     await nav('运行日志').click()
+    await page.getByLabel('搜索日志',{exact:true}).fill('离房后仍可搜索的房间')
+    check(await page.getByText('离线结算记录',{exact:true}).isVisible(),'log name survives room removal and remains searchable')
     await page.getByLabel('搜索日志', { exact: true }).fill('不存在')
     check(
       await page.getByRole('heading', { name: '没有匹配的日志' }).isVisible(),
@@ -554,6 +583,62 @@ module.exports = async function verifyUI(config, output) {
     await page.getByRole('button',{name:'重新校验',exact:true}).click()
     await page.getByText('已连接',{exact:true}).waitFor()
     check(!(await page.evaluate(()=>window.__fixture.calls.login)), 'background retry does not open manual login')
+    await nav('策略设置').click()
+    await page.getByRole('button',{name:'支出与粉丝团',exact:true}).click()
+    await page.getByRole('button',{name:'重置本轮预算',exact:true}).click()
+    await page.getByRole('dialog').waitFor()
+    check(await page.getByRole('dialog').getByText('每日已用同时归零',{exact:false}).isVisible(),'budget reset explains daily allowance')
+    await page.screenshot({path:path.join(output,'ui-budget-reset.png'),fullPage:true})
+    await page.getByRole('dialog').getByRole('button',{name:'取消',exact:true}).click()
+    check(!(await page.evaluate(()=>window.__fixture.calls.budgetReset)),'cancel keeps budget unchanged')
+    await page.getByRole('button',{name:'重置本轮预算',exact:true}).click()
+    await page.getByRole('dialog').getByRole('button',{name:'确认重置预算',exact:true}).click()
+    await page.getByRole('dialog').waitFor({state:'hidden'})
+    check((await page.evaluate(()=>window.__fixture.calls.budgetReset))===1,'budget reset dispatches once')
+    check(await page.getByRole('button',{name:'重置本轮预算',exact:true}).isDisabled(),'empty budget cycle cannot be reset twice')
+    check(await page.getByText('当前预算轮次尚无参与或支付记录，无需重复重置。',{exact:true}).isVisible(),'disabled empty reset explains why')
+    check(await page.getByText('本轮已用 0 · 累计支出 7',{exact:false}).isVisible(),'cycle and lifetime totals remain distinguishable')
+    await nav('策略设置').click()
+    await page.getByRole('button',{name:'参与偏好',exact:true}).click()
+    const budgetBefore=await page.evaluate(()=>window.__fixture.config.diamondBudget)
+    await page.getByRole('button',{name:'实物优先',exact:true}).click()
+    await page.getByRole('button',{name:'保存设置',exact:true}).click()
+    await page.getByText('已保存，下次运行生效',{exact:true}).waitFor()
+    check((await page.evaluate(()=>window.__fixture.config.diamondBudget))===budgetBefore,'presets preserve budget')
+    check((await page.evaluate(()=>window.__fixture.config.fudaiTypes.physical))===true,'preset updates preferences')
+    await page.evaluate(()=>{
+      const f=window.__fixture,n=Date.now(),u='https://live.douyin.com/10000001'
+      f.insights.rounds=Array.from({length:320},(_,i)=>({key:`round-${i}`,roomUrl:u,lotteryId:`lottery-${i}`,createdAt:n-i*1000,drawAt:n-i*1000,confirmedAt:n-i*1000,result:i===319?'won':'lost',prizeType:i===319?'physical':null,prizeName:i===319?'离线实物奖品':null,claimed:false,budgetCycle:0,claimDueAt:null}))
+      f.insights.reports=[{id:'run',startedAt:n-120000,endedAt:n,activeMs:60000,reason:'定时停止',source:'首页',budgetCycle:0,confirmed:3,won:1,lost:1,unknown:1,pending:0,spent:1,reserved:0,skipReasons:{'任务无法完成':2}}]
+      f.insights.cycles=[{cycle:0,spent:7,reserved:0,confirmed:320}]
+      f.insights.alerts=[{id:'claim:round-319',kind:'claim',title:'实物中奖，待填写领取信息',message:'离线测试提醒',at:n,dismissedAt:null}]
+    })
+    await nav('运行记录').click()
+    await page.getByText('离线实物奖品',{exact:false}).first().waitFor({timeout:8000})
+    check(await page.getByText('领取期限未识别，请在抖音确认',{exact:false}).isVisible(),'claim deadline is not invented')
+    await page.getByRole('button',{name:'打开直播间查看',exact:true}).click()
+    check((await page.evaluate(()=>window.__fixture.calls.openClaim))===1,'claim link uses explicit user action')
+    await page.getByRole('button',{name:'已完成领取信息处理',exact:true}).click()
+    await page.getByText('暂无待处理奖励',{exact:true}).waitFor()
+    check((await page.evaluate(()=>window.__fixture.insights.rounds[319].claimed))===true,'claim completion is persisted')
+    await page.getByLabel('记录状态',{exact:true}).selectOption('won')
+    check((await page.getByRole('row').count())===2,'result filter reaches records beyond 300')
+    check(await page.getByText('共 1 条',{exact:true}).isVisible(),'filtered count is accurate')
+    await page.getByText('预算轮次历史',{exact:true}).click()
+    check(await page.getByText('支出 7 钻 / 预留 0 钻',{exact:true}).isVisible(),'budget cycle history is visible')
+    await page.locator('.run-report summary').click()
+    check(await page.getByText('活跃 1.0 分钟',{exact:true}).isVisible(),'run report separates active time')
+    check(await page.getByText('未知 1',{exact:true}).isVisible(),'report retains unknown results')
+    await page.screenshot({path:path.join(output,'ui-product-review.png'),fullPage:true})
+    await page.getByRole('button',{name:'稍后查看提醒',exact:true}).click()
+    check((await page.evaluate(()=>window.__fixture.calls.dismissAlert))===1,'popup can be dismissed')
+    await nav('运行面板').click()
+    await page.evaluate(()=>{const f=window.__fixture;f.state.candidates=[{url:'https://live.douyin.com/10000002',name:'可移除候选',lotteryId:'x',cost:1,startAt:Date.now()+30000,taskAt:Date.now()+75000,entryRemainingSeconds:30,remainingSeconds:120}];f.phase('running')})
+    await page.getByRole('button',{name:'今天跳过',exact:true}).click()
+    check((await page.evaluate(()=>window.__fixture.calls.skipToday))===1,'skip today dispatches once')
+    await page.getByRole('button',{name:'本轮结束后停止',exact:true}).click()
+    check((await page.evaluate(()=>window.__fixture.calls.finish))===1,'graceful stop is separate from immediate stop')
+    check(await page.getByRole('button',{name:'正在等待本轮结束',exact:true}).isDisabled(),'finish request cannot repeat')
     await page.goto('https://fixture.local/?auth=expired')
     await page.getByRole('heading',{name:'登录已失效，请重新登录'}).waitFor()
     check(await page.getByRole('button',{name:'登录抖音',exact:true}).first().isVisible(), 'explicit expiry offers manual login')

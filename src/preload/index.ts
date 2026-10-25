@@ -1,7 +1,10 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
 const api = {
+  alerts: {dismiss:(id:string)=>ipcRenderer.invoke(id.startsWith('login:')?'alerts:dismissTransient':'alerts:dismiss',id)},
   insights: {
+    openClaim:(key:string)=>ipcRenderer.invoke('insights:openClaim',key),
+    claim:(key:string,claimed:boolean)=>ipcRenderer.invoke('insights:claim',key,claimed),
     get: () => ipcRenderer.invoke('insights:get'),
     room: (url: string, patch: Record<string, boolean>) => ipcRenderer.invoke('insights:room', url, patch),
     payment: (id: string, state: 'confirmed' | 'failed') => ipcRenderer.invoke('insights:payment', id, state),
@@ -35,6 +38,8 @@ const api = {
     reset: () => ipcRenderer.invoke('runStats:reset')
   },
   autoRun: {
+    finish:()=>ipcRenderer.invoke('autoRun:finish'),
+    skip:(url:string,id:string,today:boolean)=>ipcRenderer.invoke('autoRun:skip',url,id,today),
     start: (options?: {
       sourceUrl?: string
       scanIntervalSeconds?: number
@@ -54,7 +59,7 @@ const api = {
   },
   // 事件监听
   on: (channel: string, callback: (...args: any[]) => void) => {
-    if (!['room:update','room:removed','log:add','run-stats:update','auto-run:update'].includes(channel)) throw new Error('Unsupported event')
+    if (!['room:update','room:removed','log:add','run-stats:update','auto-run:update','alerts:update','navigate:records'].includes(channel)) throw new Error('Unsupported event')
     const subscription = (_event: any, ...args: any[]) => callback(...args)
     ipcRenderer.on(channel, subscription)
     return () => ipcRenderer.removeListener(channel, subscription)

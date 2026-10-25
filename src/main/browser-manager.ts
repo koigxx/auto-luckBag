@@ -5,6 +5,9 @@ import { checkSignal } from './execution-gate'
 import { ROOM_NAVIGATION_TIMEOUT_SECONDS } from '../shared/policy'
 
 export class BrowserManager {
+  private closing=false
+  private disconnected:()=>void=()=>{}
+  setDisconnected(fn:()=>void):void {this.disconnected=fn}
   private browser: Browser | null = null
   private context: BrowserContext | null = null
   private creating: Promise<BrowserContext> | null = null
@@ -22,8 +25,11 @@ export class BrowserManager {
     } catch (error) { await browser.close(); throw error }
   }
   async getBrowser(): Promise<Browser> {
-    if (!this.browser?.isConnected()) this.browser = await chromium.launch({ headless: false,
+    if (!this.browser?.isConnected()) {
+      this.browser = await chromium.launch({ headless: false,
       ...(fs.existsSync(chromium.executablePath())?{}:{channel:'msedge'}), args: ['--window-size=1440,900'] })
+      this.browser.on('disconnected',()=>{this.context=null;this.browser=null;if(!this.closing)this.disconnected()})
+    }
     return this.browser
   }
   async getContext(): Promise<BrowserContext> {
@@ -52,9 +58,11 @@ export class BrowserManager {
   }
   async closeManagedPages(): Promise<void> { await Promise.allSettled([...this.pages].map(p => p.close())); this.pages.clear() }
   async closeContext(): Promise<void> {
+    this.closing=true
     await this.creating?.catch(() => {})
     await this.context?.close().catch(() => {})
     this.context = null
+    this.closing=false
   }
-  async close(): Promise<void> { await this.closeContext(); await this.browser?.close().catch(() => {}); this.browser = null }
+  async close(): Promise<void> { await this.closeContext(); this.closing=true;await this.browser?.close().catch(() => {}); this.browser = null;this.closing=false }
 }

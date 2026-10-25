@@ -17,6 +17,8 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{
   start: [options: { sourceUrl?: string; stopAfterMinutes?: number }]
+  finish: []
+  skip:[url:string,id:string,today:boolean]
   stop: []
   login: []
   checkLogin: []
@@ -166,7 +168,7 @@ function start() {
             }}
           </button>
           <button v-else-if="active" class="button stop large" :disabled="busy.stop" @click="emit('stop')">
-            <UiIcon name="stop" />{{ busy.stop ? tr('正在停止…', 'Stopping…') : tr('停止运行', 'Stop run') }}
+            <UiIcon name="stop" />{{ busy.stop ? tr('正在停止…', 'Stopping…') : tr('立即停止', 'Stop now') }}
           </button>
           <button v-else-if="held" class="button primary large" @click="emit('records')">
             <UiIcon name="alert" />{{ tr('查看待处理事项', 'Review pending items') }}
@@ -192,6 +194,8 @@ function start() {
             }}<UiIcon name="chevron" :size="16" />
           </button>
         </div>
+        <button v-if="active" class="button" :disabled="busy.finish || state?.session?.finishRequested || busy.stop" @click="emit('finish')">{{ state?.session?.finishRequested ? tr('正在等待本轮结束','Finishing current round') : tr('本轮结束后停止','Stop after this round') }}</button>
+        <p v-if="active" class="microcopy">{{ tr('立即停止会取消在途任务；收尾也受本段硬截止限制。','Stop immediately cancels pending tasks. Finishing remains subject to the hard deadline.') }}</p>
         <details v-if="!active && !held" class="run-options">
           <summary>{{ tr('本次运行选项', 'Options for this run') }}</summary>
           <div class="form-grid compact">
@@ -244,6 +248,7 @@ function start() {
             <dd>{{ config.policy.dailyMinutes }} {{ tr('分钟', 'min') }}</dd>
           </div>
         </dl>
+        <p class="microcopy">{{ tr(`任务准备 ${config.enterBeforeSeconds} 秒；单次最多 ${config.policy.paymentLimit} 钻；今日可用 ${budget?.dailyRemaining ?? '—'} 钻。`, `Task window ${config.enterBeforeSeconds}s; per payment ${config.policy.paymentLimit}; daily remaining ${budget?.dailyRemaining ?? '—'}.`) }}</p>
         <div class="budget-summary">
           <div class="budget-caption">
             <span>{{ tr('剩余钻石预算', 'Diamond budget left') }}</span
@@ -318,17 +323,16 @@ function start() {
           <h3>
             {{
               active
-                ? tr('正在寻找合适的直播间', 'Looking for a suitable room')
+                ? phase === 'running'
+                  ? state?.waitingReason || tr('正在寻找合适的直播间', 'Looking for a suitable room')
+                  : status
                 : tr('还没有正在参与的直播间', 'No room is active yet')
             }}
           </h3>
           <p>
             {{
               active
-                ? tr(
-                    '候选会逐个验证，满足条件后自动进房。',
-                    'Candidates are checked individually before joining.'
-                  )
+                ? description
                 : tr('开始自动运行，或添加一个直播间进行验证。', 'Start a run or add a room to verify it.')
             }}
           </p>
@@ -380,6 +384,9 @@ function start() {
         <div v-for="candidate in state?.candidates || []" :key="candidate.url" class="candidate-item">
           <div>
             <strong>{{ candidate.name }}</strong>
+            <p>{{ tr('预计新增费用','Estimated new cost') }} {{ candidate.cost ?? '—' }} {{ tr('钻','diamonds') }} · {{ tr('任务准备','Task window') }} {{ time(candidate.taskAt) }}</p>
+            <details class="evidence"><summary>{{ tr('预约依据','Reservation details') }}</summary><p>{{ candidate.reason }}</p><p>{{ tr('返房复验','Return check') }} {{ time(candidate.startAt) }} · {{ tr('返房后仍需核对本轮任务和费用','Tasks and costs are checked again on return') }}</p></details>
+            <div class="button-row"><button class="button small" :disabled="!candidate.lotteryId || busy[`candidate:${candidate.url}`]" @click="emit('skip',candidate.url,candidate.lotteryId!,false)">{{ tr('移除本轮','Skip this round') }}</button><button class="button text-button small" :disabled="!candidate.lotteryId || busy[`candidate:${candidate.url}`]" @click="emit('skip',candidate.url,candidate.lotteryId!,true)">{{ tr('今天跳过','Skip today') }}</button></div>
             <p :title="candidate.reason">
               {{
                 candidate.probability == null

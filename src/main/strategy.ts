@@ -9,6 +9,8 @@ export interface Evaluation {
   mode: 'estimate' | 'fallback'
   leadSeconds: number
   startAt: number
+  /** Actual navigation dispatch for an already-open page; otherwise startAt. */
+  navigationAt?: number
   endAt: number
 }
 export function taskLead(
@@ -130,10 +132,11 @@ export function bestSchedule<T extends { evaluation: Evaluation }>(items: T[], l
     bestFallback = -Infinity
   for (let mask = 1; mask < 1 << values.length; mask++) {
     const chosen = values.filter((_, i) => mask & (1 << i)).sort((a,b) => a.evaluation.startAt-b.evaluation.startAt)
+    const navigationTimes = chosen.map(x => x.evaluation.navigationAt ?? x.evaluation.startAt).sort((a,b) => a-b)
     if (
       chosen.length > limit ||
       chosen.some((a, i) => chosen.slice(i + 1).some((b) => conflicts(a.evaluation, b.evaluation))) ||
-      chosen.some((a,i) => i > 0 && a.evaluation.startAt - chosen[i-1].evaluation.startAt < navigationGapSeconds * 1000)
+      navigationTimes.some((at,i) => i > 0 && at - navigationTimes[i-1] < navigationGapSeconds * 1000)
     )
       continue
     // Quantified utility and unknown-odds utility are not comparable. Prefer

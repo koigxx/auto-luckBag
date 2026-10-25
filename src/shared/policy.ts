@@ -106,6 +106,8 @@ export interface RoomProfile {
   failures: number
 }
 export interface RoundRecord {
+  runId?: string
+  budgetCycle?: number
   key: string
   lotteryId: string
   roomUrl: string
@@ -126,6 +128,8 @@ export interface RoundRecord {
   actions?: Partial<Record<'comment' | 'follow', { at: number; command?: string }>>
 }
 export interface Payment {
+  runId?: string
+  budgetCycle?: number
   id: string
   roundKey: string
   roomUrl: string
@@ -137,6 +141,7 @@ export interface Payment {
 }
 export type SessionPhase = 'stopped' | 'running' | 'draining' | 'resting' | 'resume-check' | 'blocked'
 export interface SessionRecord {
+  finishRequested?: boolean
   phase: SessionPhase
   startedAt: number | null
   drainAt: number | null
@@ -151,7 +156,21 @@ export interface SessionRecord {
 }
 export interface RiskRecord { at: number; reason: string; source: string; resolvedAt: number | null }
 export interface DecisionRecord { at: number; url: string; action: string; reason: string; score: number | null; probability: number | null; seed?: number; snapshot?: {version:2;opportunity:Opportunity;leadSeconds:number;utility:number;mode:string;sampleCount:number} }
+export interface RunRecord {
+  silentEnd?: boolean
+  id: string; startedAt: number; endedAt: number | null; reason: string
+  activeBaseline: number; activeMs: number; budgetCycle: number; source: string
+  skipReasons: Record<string, number>
+}
+export interface UserAlert {
+  id: string; kind: 'login' | 'claim' | 'ended'; title: string; message: string; at: number; dismissedAt: number | null
+}
 export interface AccountData {
+  runs?: RunRecord[]
+  alerts?: UserAlert[]
+  skippedRounds?: Record<string, number>
+  skippedDays?: Record<string, string>
+  budgetCycle?: number
   openingSpent: number
   legacyStats: Record<string, unknown>
   rooms: Record<string, RoomProfile>

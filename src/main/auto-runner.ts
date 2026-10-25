@@ -94,6 +94,10 @@ export class AutoRunner {
       enterBeforeSeconds: this.env.store.get('enterBeforeSeconds'),
       candidatePoolLimit: this.env.store.get('candidatePoolLimit'),
       candidates: this.pool.map((r) => ({
+        lotteryId:r.opportunity.lotteryId,
+        cost:r.opportunity.cost,
+        startAt:r.evaluation.startAt,
+        taskAt:(r.drawAt||0)-Math.max(this.env.store.get('enterBeforeSeconds'),r.evaluation.leadSeconds-RETURN_PREPARATION_SECONDS)*1000,
         url: r.url,
         name: r.name,
         score: Number(r.evaluation.score.toFixed(3)),
@@ -131,6 +135,7 @@ export class AutoRunner {
       this.env.policy(),
       options.stopAfterMinutes ? this.env.now() + options.stopAfterMinutes * 60000 : null
     )
+    this.env.repository.beginRun(this.sourceUrl)
     this.env.execution.start()
     this.automatic = true
     this.pool = []
@@ -163,6 +168,7 @@ export class AutoRunner {
     }
     if (revision !== this.revision) throw new Error('启动已取消')
     this.env.sessionEngine.start(this.env.policy())
+    this.env.repository.beginRun('手动参与')
     this.env.execution.start()
     this.automatic = false
     this.startTimer()
@@ -172,6 +178,21 @@ export class AutoRunner {
     this.timer = this.env.setTimer(() => {
       void this.pulse().catch((e) => this.log(e.message))
     })
+  }
+  async finishCurrent():Promise<ReturnType<AutoRunner['getState']>> {
+    if(!['running','draining'].includes(this.getState().status))return this.stop('收尾后停止')
+    this.env.sessionEngine.requestFinish()
+    this.pool=[];this.pending=[]
+    this.publish()
+    if(!this.rooms.getAllRooms().length)return this.stop('没有待收尾轮次，已停止')
+    return this.getState()
+  }
+  removeCandidate(url:string,lotteryId:string,today=false):void {
+    const candidate=this.pool.find(r=>r.url===url&&r.opportunity.lotteryId===lotteryId)
+    if(!candidate)throw new Error('候选已进房或发生变化，请刷新后重试')
+    this.env.repository.skipCandidate(url,lotteryId,candidate.drawAt!,today,this.env.policy().timezone)
+    this.pool=this.pool.filter(r=>r!==candidate)
+    this.publish()
   }
   async stop(reason = '手动停止'): Promise<ReturnType<AutoRunner['getState']>> {
     this.revision++
@@ -189,6 +210,7 @@ export class AutoRunner {
     await this.env.haltPages()
     await this.discovery.close()
     await this.rooms.closeAllRooms()
+    if(this.env.repository.read().activeAccount)this.env.repository.finishRun(this.env.repository.account().session.reason)
     this.stats.markStopped()
     this.publish()
     return this.getState()
@@ -226,7 +248,12 @@ export class AutoRunner {
           this.busy = false
         }
       }
-      if (['blocked', 'stopped'].includes(s.phase)) {
+      if (['blocked', 'stopped'].includes(this.env.repository.account().session.phase)) {
+        await this.env.haltPages()
+        await this.discovery.close()
+        await this.rooms.closeAllRooms()
+        this.env.repository.finishRun(this.env.repository.account().session.reason)
+        this.stats.markStopped()
         this.automatic = false
         if (this.timer) {
           this.env.clearTimer(this.timer)
@@ -269,6 +296,7 @@ export class AutoRunner {
       p = this.env.policy(),
       records = Object.values(a.rounds).filter((r) => r.roomUrl === room.url)
     const e = evaluate(room.opportunity, p, this.env.now(), a.rooms[room.url], records, open)
+    if(this.env.repository.isSkipped(room.url,room.opportunity.lotteryId,p.timezone))return {...e,feasible:false,reason:'用户已跳过此候选或今日房间'}
     if (!e.feasible) return e
     const types = this.env.store.get('fudaiTypes'),
       o = room.opportunity
@@ -352,11 +380,11 @@ export class AutoRunner {
       rng = seededRandom(a.session.seed + a.decisions.length),
       p = this.env.policy()
     const history = rankHistory(Object.values(a.rooms), this.env.now(), p, rng).filter(
-      (r) => r.visits.length > 0 && r.lastSeenAt >= this.historyFreshAfter && !this.pool.some((c) => c.url === r.url)
+      (r) => r.visits.length > 0 && !this.env.repository.isSkipped(r.url,undefined,p.timezone) && r.lastSeenAt >= this.historyFreshAfter && !this.pool.some((c) => c.url === r.url)
     )
     this.pending = this.pending.filter(
       (r) =>
-        !a.rooms[r.url]?.blocked &&
+        !a.rooms[r.url]?.blocked && !this.env.repository.isSkipped(r.url,undefined,p.timezone) &&
         (a.rooms[r.url]?.nextEligibleCheckAt || 0) <= this.env.now() &&
         !this.pool.some((c) => c.url === r.url)
     )
@@ -421,6 +449,7 @@ export class AutoRunner {
   }
   private async verifyAndSchedule(candidate: DiscoveredRoom, reserved = false): Promise<boolean> {
     const signal = this.env.execution.signal
+    const verificationStartedAt = this.env.now()
     const result = await this.discovery.verifyRoom(candidate, { keepPageOnVerified: true, reserved })
     try {
       this.env.assertActive(signal, true)
@@ -442,9 +471,9 @@ export class AutoRunner {
         e.reason = '验证页面未保留，无法直接参与'
       }
       const a = this.env.repository.account()
-      this.env.repository.decision({
+      const recordDecision = (action: 'takeover' | 'candidate' | 'skip') => this.env.repository.decision({
         url: room.url,
-        action: e.feasible ? (direct ? 'takeover' : 'candidate') : 'skip',
+        action,
         reason: e.reason,
         score: e.score,
         probability: e.probability,
@@ -459,11 +488,16 @@ export class AutoRunner {
         }
       })
       if (!e.feasible) {
+        recordDecision('skip')
         this.log(`跳过 ${room.name}：${e.reason}`)
         return true
       }
       if (direct && result.page) {
-        const immediate = { ...room, evaluation: { ...e, startAt: this.env.now() } }
+        // Reuse only this verification's actual dispatch, never an older visit.
+        // Missing dispatch evidence keeps the conservative completion-time anchor.
+        const navigationAt = a.navigations.filter(n => n.url === room.url &&
+          n.at >= verificationStartedAt && n.at <= this.env.now()).at(-1)?.at ?? this.env.now()
+        const immediate = { ...room, evaluation: { ...e, startAt: this.env.now(), navigationAt } }
         const choices = [...this.pool, immediate]
         const chosen = bestSchedule(choices, this.env.store.get('candidatePoolLimit'),
           this.env.policy().navigationMaxSeconds)
@@ -473,6 +507,7 @@ export class AutoRunner {
           return true
         }
         this.pool = chosen.filter(r => r !== immediate)
+        recordDecision('takeover')
         this.log(
           `接管页面，准备参与 ${room.name}：剩余 ${Math.ceil((room.drawAt! - this.env.now()) / 1000)} 秒，继续校验弹窗身份与任务`
         )
@@ -485,6 +520,7 @@ export class AutoRunner {
         return true
       }
       const candidates = [...this.pool, { ...room, evaluation: e }]
+      recordDecision('candidate')
       this.pool = bestSchedule(
         candidates,
         this.env.store.get('candidatePoolLimit'), this.env.policy().navigationMaxSeconds
@@ -501,6 +537,7 @@ export class AutoRunner {
     }
   }
   private continuationReason(o: Opportunity | null, room: {url:string;name:string}): string | null {
+    if(this.env.repository.account().session.finishRequested)return '本轮已结束，按用户要求停止，不续下一轮'
     if (!this.automatic) return null
     // Pool expiry is normally pruned by cycle(), which does not run while a
     // room is active. Expired reservations must not force that room to leave.

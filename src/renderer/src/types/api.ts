@@ -1,5 +1,8 @@
 export interface API {
+  alerts:{dismiss:(id:string)=>Promise<{success:boolean;error?:string}>}
   insights: {
+    openClaim:(key:string)=>Promise<{success:boolean;error?:string}>
+    claim:(key:string,claimed:boolean)=>Promise<{success:boolean;error?:string}>
     get: () => Promise<import('../../../shared/insights').Insights | null>
     room: (url: string, patch: Record<string, boolean>) => Promise<{success:boolean;error?:string}>
     payment: (id: string, state: 'confirmed' | 'failed') => Promise<{success:boolean;error?:string}>
@@ -22,7 +25,7 @@ export interface API {
   config: {
     get: () => Promise<import('./index').AppConfig>
     set: (config: Partial<import('./index').AppConfig>) => Promise<{ success: boolean; error?:string; config?:import('./index').AppConfig }>
-    resetDiamondUsed: () => Promise<{ success: boolean }>
+    resetDiamondUsed: () => Promise<{ success: boolean; changed?:boolean; error?:string; config?:import('./index').AppConfig }>
   }
   stats: {
     get: () => Promise<import('./index').Stats>
@@ -32,6 +35,8 @@ export interface API {
     reset: () => Promise<import('./index').RunStats>
   }
   autoRun: {
+    finish:()=>Promise<{success:boolean;error?:string;state:import('./index').AutoRunState}>
+    skip:(url:string,id:string,today:boolean)=>Promise<{success:boolean;error?:string;state:import('./index').AutoRunState}>
     start: (options?: {
       sourceUrl?: string
       scanIntervalSeconds?: number

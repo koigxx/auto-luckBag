@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import type { Insights } from '../../../shared/insights'
 import type { Payment, RoomProfile } from '../../../shared/policy'
+import ReviewSummary from './ReviewSummary.vue'
 import UiIcon from './UiIcon.vue'
 import UiDialog from './UiDialog.vue'
 const props = defineProps<{
@@ -24,6 +25,17 @@ const filter = ref('')
 const roomFilter = ref('all')
 const tab = ref('rounds')
 const page = ref(1)
+const search=ref(''), dateFrom=ref(''),dateTo=ref(''),resultFilter=ref(''),cycleFilter=ref('')
+function matches(r:any):boolean {
+  const at=r.createdAt??r.at,day=at?new Date(at).toLocaleDateString('en-CA'):''
+  return `${name(r.roomUrl||r.url||'')} ${r.reason||''}`.toLowerCase().includes(search.value.toLowerCase()) &&
+    (!dateFrom.value||day>=dateFrom.value)&&(!dateTo.value||day<=dateTo.value)&&
+    (!resultFilter.value||(r.result||r.state||r.action)===resultFilter.value)&&
+    (!cycleFilter.value||(r.budgetCycle??0)===Number(cycleFilter.value))
+}
+const filteredRounds=computed(()=>props.data?.rounds.filter(matches)||[])
+const filteredPayments=computed(()=>props.data?.payments.filter(matches)||[])
+const filteredDecisions=computed(()=>props.data?.decisions.filter(matches)||[])
 const confirmation = ref<{
   kind: 'payment' | 'reset'
   payment?: Payment
@@ -59,13 +71,14 @@ const unresolved = computed(
   () => props.data?.payments.filter((payment) => payment.state === 'unresolved') || []
 )
 const risks = computed(() => props.data?.risks.filter((risk) => risk.resolvedAt === null) || [])
+watch(tab,()=>{resultFilter.value='';cycleFilter.value=''})
 const rows = computed(
   () =>
     (tab.value === 'rounds'
-      ? props.data?.rounds
+      ? filteredRounds.value
       : tab.value === 'payments'
-        ? props.data?.payments
-        : props.data?.decisions) || []
+        ? filteredPayments.value
+        : filteredDecisions.value) || []
 )
 const total = computed(() => (props.view === 'library' ? rooms.value.length : rows.value.length))
 const pages = computed(() => Math.max(1, Math.ceil(total.value / 15)))
@@ -75,13 +88,14 @@ const dialogTitle = computed(() =>
     ? tr('重置展示统计', 'Reset display totals')
     : tr('核对这笔支付', 'Reconcile this payment')
 )
-watch([() => props.view, filter, roomFilter, tab], () => {
+watch([() => props.view, filter, roomFilter, tab,search,dateFrom,dateTo,resultFilter,cycleFilter], () => {
   page.value = 1
 })
 watch(pages, (count) => {
   if (page.value > count) page.value = count
 })
 function label(value: string | null) {
+  if(value==='budget-reset')return tr('开始新预算轮次','New budget cycle')
   const map: Record<string, [string, string]> = {
     unknown: ['未知', 'Unknown'],
     pending: ['等待开奖', 'Pending'],
@@ -152,6 +166,7 @@ async function changeRoom(room: RoomProfile, key: 'favorite' | 'blocked' | 'allo
   </section>
   <div v-else class="records-view">
     <template v-if="view === 'records'">
+      <ReviewSummary :data="data" :busy="busy" :on-action="onAction" />
       <section v-if="unresolved.length || risks.length" class="review-panel" aria-labelledby="review-title">
         <div class="section-heading">
           <h2 id="review-title"><UiIcon name="alert" />{{ tr('需要处理', 'Needs attention') }}</h2>
@@ -292,6 +307,13 @@ async function changeRoom(room: RoomProfile, key: 'favorite' | 'blocked' | 'allo
           </button>
         </div>
       </div>
+      <div v-if="view==='records'" class="record-filters">
+        <input v-model="search" type="search" placeholder="搜索房间或原因" aria-label="搜索运行记录" />
+        <input v-model="dateFrom" type="date" aria-label="记录开始日期" /><input v-model="dateTo" type="date" aria-label="记录结束日期" />
+        <select v-model="resultFilter" aria-label="记录状态"><option value="">全部状态</option><option v-for="value in (tab==='rounds'?['won','lost','unknown','pending','cancelled']:tab==='payments'?['confirmed','failed','unresolved','submitted','reserved']:['skip','candidate','takeover','budget-reset','reconcile'])" :key="value" :value="value">{{label(value)}}</option></select>
+        <select v-model="cycleFilter" aria-label="预算轮次筛选" v-if="tab!=='decisions'"><option value="">全部预算轮次</option><option v-for="c in data.cycles||[]" :key="c.cycle" :value="String(c.cycle)">预算第 {{c.cycle+1}} 轮</option></select>
+        <button class="button small" @click="search='';dateFrom='';dateTo='';resultFilter='';cycleFilter=''">清除筛选</button>
+      </div>
       <p v-if="view === 'library'" class="table-note">
         {{
           running
@@ -386,7 +408,7 @@ async function changeRoom(room: RoomProfile, key: 'favorite' | 'blocked' | 'allo
             </tr>
           </thead>
           <tbody>
-            <tr v-for="round in data.rounds.slice(start, start + 15)" :key="round.key">
+            <tr v-for="round in filteredRounds.slice(start, start + 15)" :key="round.key">
               <td>
                 <strong class="cell-title">{{ name(round.roomUrl) }}</strong
                 ><small>{{ time(round.drawAt) }}</small>
@@ -424,7 +446,7 @@ async function changeRoom(room: RoomProfile, key: 'favorite' | 'blocked' | 'allo
             </tr>
           </thead>
           <tbody>
-            <tr v-for="payment in data.payments.slice(start, start + 15)" :key="payment.id">
+            <tr v-for="payment in filteredPayments.slice(start, start + 15)" :key="payment.id">
               <td>
                 <strong class="cell-title">{{ name(payment.roomUrl) }}</strong
                 ><small>{{ time(payment.at) }}</small>
@@ -456,7 +478,7 @@ async function changeRoom(room: RoomProfile, key: 'favorite' | 'blocked' | 'allo
             </tr>
           </thead>
           <tbody>
-            <tr v-for="(decision, index) in data.decisions.slice(start, start + 15)" :key="index">
+            <tr v-for="(decision, index) in filteredDecisions.slice(start, start + 15)" :key="index">
               <td>
                 <strong class="cell-title">{{ name(decision.url) }}</strong
                 ><small>{{ time(decision.at) }}</small>
