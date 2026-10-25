@@ -33,6 +33,12 @@ module.exports=async function alertsSmoke(output){
     })
     await new Promise(r=>setTimeout(r,1800))
     assert.equal(electron.windows().length,1,'payment uncertainty stays silent')
+    const riskEvent=electron.waitForEvent('window',{timeout:10000})
+    await electron.evaluate(()=>global.repo.risk('请完成下列验证后继续','visible-challenge','https://live.douyin.com/12345678'))
+    const issue=await riskEvent
+    await issue.getByRole('heading',{name:'异常待办需要处理'}).waitFor()
+    const issueClosed=issue.waitForEvent('close');await issue.getByRole('link',{name:'稍后查看'}).click();await issueClosed
+    assert.equal(await electron.evaluate(()=>global.repo.account().risks.filter(r=>r.resolvedAt===null).length),1,'dismissing a popup leaves the issue blocked')
     const loginEvent=electron.waitForEvent('window',{timeout:10000})
     await electron.evaluate(()=>{global.repo.unbind();global.auth.state='expired'})
     const login=await loginEvent;await login.getByRole('heading',{name:'登录已失效'}).waitFor()

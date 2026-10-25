@@ -2,10 +2,10 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {RuntimeRepository,emptyRuntime} from '../src/main/runtime-repository'
 import {SessionEngine} from '../src/main/session-engine'
-import {DEFAULT_POLICY} from '../src/shared/policy'
+import {DEFAULT_POLICY,riskId} from '../src/shared/policy'
 import {defaults,participationPreset} from '../src/shared/config'
 import {runReports,budgetCycles,pendingAlerts,sortAlerts} from '../src/shared/review'
-import {inRun,recordTotals,roomDisplayName} from '../src/shared/record-presentation'
+import {inRun,recordTotals,roomDisplayName,discoveryRoomName} from '../src/shared/record-presentation'
 import {returnProgress,timeProgress} from '../src/shared/display-progress'
 const url='https://live.douyin.com/12345678'
 test('display progress uses pushed time, keeps unknown unknown, and clamps deadline boundaries',()=>{
@@ -19,6 +19,43 @@ test('display progress uses pushed time, keeps unknown unknown, and clamps deadl
   assert.equal(returnProgress({startAt:101000,entryRemainingSeconds:60}),null)
 })
 function fixture(){let data=emptyRuntime(),now=Date.UTC(2026,9,25,2);const repo=new RuntimeRepository({read:()=>data,write:d=>{data=structuredClone(d)}},()=>now);repo.bind('a',{spent:0,stats:{},rooms:[]});repo.room(url);return {repo,advance:(ms:number)=>now+=ms}}
+test('issue todos persist, dismiss independently, and resolve individually without resuming',()=>{
+  const {repo:r,advance}=fixture();r.beginRun('home')
+  r.risk('请完成下列验证后继续','visible-challenge',url)
+  r.risk('请完成下列验证后继续','visible-challenge',url)
+  assert.equal(r.account().risks.length,1)
+  const first=r.account().risks[0],id=riskId(first)
+  for(const n of pendingAlerts(r.account()))r.alert(n)
+  r.dismissAlert(id)
+  assert.equal(first.resolvedAt,null)
+  assert.equal(pendingAlerts(r.account()).length,0)
+  r.finishRun(first.reason)
+  advance(1);r.risk('手机验证码','visible-challenge',url)
+  const second=riskId(r.account().risks[1])
+  r.recover();r.bind('a',{spent:0,stats:{},rooms:[]})
+  r.resolveRisk(id)
+  assert.equal(r.account().risks.filter(x=>x.resolvedAt===null).length,1)
+  assert.equal(r.account().session.phase,'blocked')
+  r.resolveRisk(second)
+  assert.equal(r.account().session.phase,'stopped')
+  assert.equal(r.account().session.nextResumeAt,null)
+  assert.equal(pendingAlerts(r.account()).length,0)
+  assert.throws(()=>r.resolveRisk(id),/不存在/)
+})
+
+test('issue completion cannot release pending payments or resolve another account',()=>{
+  const {repo:r}=fixture()
+  const payment=r.reserve(url,'test',1,50,false,DEFAULT_POLICY)
+  r.risk('验证','visible-challenge',url)
+  const id=riskId(r.account().risks[0])
+  for(const state of ['reserved','submitted','unresolved'] as const){
+    r.payment(payment.id,state)
+    assert.throws(()=>r.resolveRisk(id),/未决支付/)
+    assert.equal(r.budget(50,false,DEFAULT_POLICY).reserved,1)
+  }
+  r.bind('other',{spent:0,stats:{},rooms:[]})
+  assert.throws(()=>r.resolveRisk(id),/不存在/)
+})
 test('record room titles preserve known names and use room IDs without inventing names',()=>{
   assert.equal(roomDisplayName(' 某主播 ',url),'某主播')
   assert.equal(roomDisplayName('直播中',url),'直播间 12345678')
@@ -127,4 +164,71 @@ test('login and claim notifications take priority over historical run completion
   const input=(['ended','claim','login'] as const).map((kind,i)=>({id:kind,kind,title:'',message:'',at:i,dismissedAt:null}))
   assert.deepEqual(sortAlerts(input).map(n=>n.kind),['login','claim','ended'])
   assert.equal(input[0].kind,'ended','sorting must not mutate persisted ordering')
+})
+
+
+test('discovery card names extract host before truncation without changing ordinary display names',()=>{
+  assert.equal(discoveryRoomName('下课没事播一下 @蛋蛋国王 3'),'蛋蛋国王')
+  assert.equal(discoveryRoomName('卧薪尝胆 @昊天（三角洲行动） 7万'),'昊天（三角洲行动）')
+  assert.equal(discoveryRoomName('标题'.repeat(60)+' @主播2026 1.2万'),'主播2026')
+  assert.equal(discoveryRoomName('普通昵称123'),'普通昵称123')
+  assert.equal(discoveryRoomName('昵称 @朋友'),'昵称 @朋友')
+  assert.equal(roomDisplayName('主播 @名字 123',url),'主播 @名字 123')
+})
+
+test('extension preserves original segment ceiling, run identity and accounting; rejects stale double submit',()=>{
+  const h=fixture(),r=h.repo,e=new SessionEngine(r,()=>0.5)
+  const start=r.now(),p={...DEFAULT_POLICY,sessionMin:30,sessionMax:30}
+  e.start(p,start+10*60000);r.beginRun('home')
+  const before=structuredClone(r.account()),old=r.account().session.stopAt!
+  const s=e.extend(30,old)
+  assert.equal(s.stopAt,start+40*60000);assert.equal(s.hardStopAt,start+30*60000)
+  assert.equal(s.startedAt,start);assert.equal(s.seed,before.session.seed)
+  assert.deepEqual(r.account().runs,before.runs);assert.deepEqual(s.activeByDay,before.session.activeByDay)
+  assert.throws(()=>e.extend(30,old),/已变化/)
+  assert.equal(r.account().session.stopAt,start+40*60000)
+  assert.equal(e.extend(60,s.stopAt!).hardStopAt,start+30*60000)
+})
+
+test('extension preserves rest and draining, rejects finish, expired, risk and invalid inputs',()=>{
+  const h=fixture(),r=h.repo,e=new SessionEngine(r),end=r.now()+3600000
+  e.start(DEFAULT_POLICY,end)
+  for(const v of [0,-1,NaN,Infinity,1.5,121])assert.throws(()=>e.extend(v,end),/1–120/)
+  r.change(a=>{a.session.phase='resting';a.session.nextResumeAt=r.now()+600000})
+  const resume=r.account().session.nextResumeAt
+  e.extend(15,end);assert.equal(r.account().session.phase,'resting');assert.equal(r.account().session.nextResumeAt,resume)
+  r.change(a=>{a.session.phase='draining'})
+  const hard=r.account().session.hardStopAt
+  e.extend(15,r.account().session.stopAt!);assert.equal(r.account().session.phase,'draining');assert.equal(r.account().session.hardStopAt,hard)
+  e.requestFinish();assert.throws(()=>e.extend(15,r.account().session.stopAt!),/不能延长/)
+  e.stop();assert.throws(()=>e.extend(15,end),/不能延长/)
+  e.start(DEFAULT_POLICY,r.now()+1000);h.advance(1000);assert.throws(()=>e.extend(15,r.account().session.stopAt!),/已到/)
+  e.start(DEFAULT_POLICY);assert.throws(()=>e.extend(15,0),/没有可延长/)
+  e.start(DEFAULT_POLICY,r.now()+3600000);r.risk('验证','visible-challenge');assert.throws(()=>e.extend(15,r.account().session.stopAt!))
+})
+
+test('extension cannot exceed allowed hours, daily cap or release unresolved payments',()=>{
+  for(const kind of ['daily','hours'] as const){
+    const h=fixture(),r=h.repo,e=new SessionEngine(r),now=r.now()
+    const p={...DEFAULT_POLICY,sessionMin:30,sessionMax:30,...(kind==='daily'?{dailyMinutes:5}:{allowedStart:'09:00',allowedEnd:'10:05'})}
+    e.start(p,now+60000)
+    assert.equal(e.extend(30,now+60000).hardStopAt,now+5*60000)
+    const pay=r.reserve(url,'ext',1,50,false,DEFAULT_POLICY);r.payment(pay.id,'unresolved')
+    assert.throws(()=>e.extend(30,r.account().session.stopAt!),/异常/)
+    assert.equal(r.budget(50,false,DEFAULT_POLICY).reserved,1)
+  }
+})
+
+
+test('extension keeps legacy ceilings and rejects more than 24 hours without mutation',()=>{
+  const h=fixture(),r=h.repo,e=new SessionEngine(r),end=r.now()+600000
+  e.start(DEFAULT_POLICY,end)
+  r.change(a=>{delete a.session.segmentLimitAt})
+  assert.equal(e.extend(30,end).hardStopAt,end)
+  e.start(DEFAULT_POLICY,r.now()+1440*60000)
+  const before=structuredClone(r.account().session)
+  assert.throws(()=>e.extend(1,before.stopAt!),/24小时/)
+  assert.deepEqual(r.account().session,before)
+  r.change(a=>{a.session.phase='resume-check'})
+  assert.throws(()=>e.extend(1,before.stopAt!),/不能延长/)
 })

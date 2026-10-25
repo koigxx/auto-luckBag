@@ -1,3 +1,4 @@
+import { visiblePageRisk } from './page-risk'
 import { Page, Request, Response, WebSocket } from 'playwright'
 import { Opportunity } from '../shared/policy'
 import { parseLottery, parseLotteryPayload, panelIdentity, riskFromText } from './lottery-parser'
@@ -53,7 +54,7 @@ export class PassiveObserver {
   identityDiagnostics(): string {
     return [...this.observations, ...this.paymentObservations].map(([path, state]) => `${path}: ${state}`).join('；') || '未记录到福袋请求响应'
   }
-  constructor(private page: Page, private signal: AbortSignal, private reportRisk:(reason:string,source:string)=>void, private onOpportunity: (o: Opportunity) => void = () => {}) {
+  constructor(private page: Page, private signal: AbortSignal, private reportRisk:(reason:string,source:string,url?:string)=>void, private onOpportunity: (o: Opportunity) => void = () => {}) {
     page.on('response', this.response)
     page.on('request', this.request)
     page.on('requestfailed', this.requestFailed)
@@ -113,7 +114,7 @@ export class PassiveObserver {
       if (lotteryPath || paymentPath || chatPath) this.note(url.pathname, reason)
       if (isRight && requestAt === this.newestPanelRequestAt) this.panelIdentityReason = reason
     }
-    if(response.status()===429){failed('HTTP 429，请求限流');this.reportRisk('服务返回请求限流','response');return}
+    if(response.status()===429){failed('HTTP 429，请求限流');this.reportRisk('服务返回请求限流','response',this.page.url());return}
     let text: string
     try { text = await response.text() } catch { failed('响应内容读取失败'); return }
     if (!this.alive || this.signal.aborted) return
@@ -126,7 +127,7 @@ export class PassiveObserver {
       json.status_code !== null && json.status_code !== '' && Number.isFinite(code) && code !== 0
         ? '评论业务返回失败' : '评论未获得明确业务成功反馈')
     const error = riskFromText(String(json.status_msg || json.message || json.prompt || ''))
-    if (code === 95152 || (code !== 0 && error)) { this.reportRisk(error || `服务返回限制代码 ${code}`, 'response'); return }
+    if (code === 95152 || (code !== 0 && error)) { this.reportRisk(error || `服务返回限制代码 ${code}`, 'response',this.page.url()); return }
     if (paymentPath) {
       const post=response.request().postData()||''
       // A locally observed request event provides the dispatch boundary even
@@ -193,14 +194,10 @@ export class PassiveObserver {
   }
   async checkPageRisk(): Promise<void> {
     if (!this.alive || this.signal.aborted || this.page.isClosed()) return
-    const text = await this.page.evaluate(() => {
-      const nodes=[...document.querySelectorAll<HTMLElement>('[role="dialog"], [class*="captcha"], [id*="captcha"], [class*="verify"]')]
-      if(/验证码|安全验证|访问异常/.test(document.title))nodes.push(document.body)
-      return nodes.filter(el=>{const r=el.getBoundingClientRect(),s=getComputedStyle(el);return r.width>20&&r.height>20&&s.display!=='none'&&s.visibility!=='hidden'&&r.bottom>0&&r.top<innerHeight}).map(el=>el.innerText.slice(0,1500)).join('\n')
-    }).catch(()=>'')
-    const reason=riskFromText(text)
-    if(reason)this.reportRisk(reason,'visible-challenge')
+    const reason = await visiblePageRisk(this.page).catch(()=>'')
+    if(reason && this.alive && !this.signal.aborted)this.reportRisk(reason,'visible-challenge',this.page.url())
   }
+
   close = (): void => {
     this.alive=false
     this.page.off('request',this.request);this.page.off('response',this.response);this.page.off('requestfailed',this.requestFailed);this.page.off('websocket',this.websocket);this.page.off('close',this.close)

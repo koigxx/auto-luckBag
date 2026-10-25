@@ -23,6 +23,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   start: [options: { sourceUrl?: string; stopAfterMinutes?: number }]
   finish: []
+  extend: [minutes:number,stopAt:number]
   skip:[url:string,id:string,today:boolean]
   stop: []
   login: []
@@ -35,12 +36,24 @@ const emit = defineEmits<{
 const tr = (zh: string, en: string) => (props.config.language === 'en-US' ? en : zh)
 const sourceUrl = ref('https://live.douyin.com')
 const stopAfter = ref<number | ''>('')
+const extensionOpen = ref(false)
+const extensionMinutes = ref(30)
+const extensionBase = ref<number | null>(null)
+const canExtend = computed(() => !!props.state?.automatic && !!props.state?.stopAt &&
+  ['running','draining','resting'].includes(phase.value) && !props.state?.session?.finishRequested && !held.value)
+function openExtension() {
+  extensionBase.value=props.state?.stopAt ?? null
+  extensionOpen.value=!extensionOpen.value
+}
+const endTime = (value:number) => new Date(value).toLocaleString(props.config.language,{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false})
+
 const phase = computed(() => props.state?.status || 'stopped')
 const timedWaiting = computed(() => !!props.state?.session && waitingForScheduledStop(props.state.session))
 const candidateName = (candidate: {name:string;url:string}) => roomDisplayName(candidate.name,candidate.url,props.config.language==='en-US')
 const active = computed(() => !!props.state?.running)
 const strategyOpen = ref(false)
-watch(active, () => { strategyOpen.value = false })
+watch(active, () => { strategyOpen.value = false; extensionOpen.value = false })
+watch(() => props.state?.stopAt, () => { extensionOpen.value=false })
 const report = computed(() => active.value
   ? props.insights?.reports?.find(r => r.endedAt === null)
   : props.insights?.reports?.[0])
@@ -150,9 +163,17 @@ function start() {
         <div class="control-deadline"><span>{{ timedWaiting ? tr('定时结束','Scheduled stop') : phase === 'resting' ? tr('距离恢复','Resume in') : tr('本段截止','Session ends') }}</span><strong>{{ timedWaiting ? time(state?.session?.stopAt) : phase === 'resting' ? duration(state?.resumeRemainingSeconds) : time(state?.session?.hardStopAt) }}</strong></div>
       </div>
       <div class="live-control-actions">
+        <button v-if="canExtend" class="button small" :disabled="busy.extend || busy.stop || busy.finish" :aria-expanded="extensionOpen" aria-controls="extend-run" @click="openExtension">{{ tr('延长时间','Extend time') }}</button>
         <button class="button small" :aria-expanded="strategyOpen" aria-controls="run-plan" @click="strategyOpen = !strategyOpen"><UiIcon name="settings" :size="16" />{{ strategyOpen ? tr('收起策略','Hide strategy') : tr('查看策略','View strategy') }}</button>
         <button class="button small" :disabled="busy.finish || state?.session?.finishRequested || busy.stop" @click="emit('finish')">{{ state?.session?.finishRequested ? tr('正在等待本轮结束','Finishing current round') : tr('本轮结束后停止','Stop after this round') }}</button>
         <button class="button stop small" :disabled="busy.stop" @click="emit('stop')"><UiIcon name="stop" :size="16" />{{ busy.stop ? tr('正在停止…','Stopping…') : tr('立即停止','Stop now') }}</button>
+      </div>
+      <div v-if="extensionOpen && canExtend && extensionBase" id="extend-run" class="extend-run">
+        <div><strong>{{ tr('延长本次定时运行','Extend this scheduled run') }}</strong><p>{{ tr('从原结束时间增加；休息、允许时段和每日上限仍然生效。已开始收尾的时段不会重新接任务。','Adds time to the original end. Breaks, allowed hours and daily limits still apply. A draining segment will finish first.') }}</p></div>
+        <label>{{ tr('增加时长','Add time') }}<select :aria-label="tr('增加时长','Add time')" v-model.number="extensionMinutes" :disabled="busy.extend"><option :value="15">15 {{ tr('分钟','min') }}</option><option :value="30">30 {{ tr('分钟','min') }}</option><option :value="60">60 {{ tr('分钟','min') }}</option></select></label>
+        <div class="extend-preview"><span>{{ endTime(extensionBase) }} →</span><strong>{{ endTime(extensionBase + extensionMinutes * 60000) }}</strong></div>
+        <button class="button primary small" :disabled="busy.extend || busy.stop || busy.finish" @click="emit('extend',extensionMinutes,extensionBase)">{{ busy.extend ? tr('正在延长…','Extending…') : tr('确认延长','Confirm extension') }}</button>
+        <button class="button small" :disabled="busy.extend" @click="extensionOpen=false">{{ tr('取消','Cancel') }}</button>
       </div>
     </section>
     <div v-show="!active || strategyOpen" id="run-plan" class="overview-grid" :class="{'compact-plan': active}">

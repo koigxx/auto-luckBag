@@ -8,7 +8,8 @@ const api = {
     get: () => ipcRenderer.invoke('insights:get'),
     room: (url: string, patch: Record<string, boolean>) => ipcRenderer.invoke('insights:room', url, patch),
     payment: (id: string, state: 'confirmed' | 'failed') => ipcRenderer.invoke('insights:payment', id, state),
-    resolveRisk: () => ipcRenderer.invoke('insights:resolveRisk'),
+    openRisk: (id:string) => ipcRenderer.invoke('insights:openRisk',id),
+    resolveRisk: (id:string) => ipcRenderer.invoke('insights:resolveRisk',id),
     export: () => ipcRenderer.invoke('insights:export')
   },
   // 登录
@@ -38,6 +39,7 @@ const api = {
     reset: () => ipcRenderer.invoke('runStats:reset')
   },
   autoRun: {
+    extend:(minutes:number,stopAt:number)=>ipcRenderer.invoke('autoRun:extend',minutes,stopAt),
     finish:()=>ipcRenderer.invoke('autoRun:finish'),
     skip:(url:string,id:string,today:boolean)=>ipcRenderer.invoke('autoRun:skip',url,id,today),
     start: (options?: {

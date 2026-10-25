@@ -690,3 +690,15 @@ test('measured return allowance preserves the 45-second task target and yields b
   assert.match(h.continue(null,{url,name:'fixture'})!,/切换时间/)
   await h.runner.stop()
 })
+
+
+test('extending an automatic run updates state without restarting execution and keeps stop authoritative',async()=>{
+  const h=harness();await h.runner.start({stopAfterMinutes:10})
+  const before=h.runner.getState(),signal=h.env.execution.signal
+  const state=h.runner.extend(30,before.stopAt!)
+  assert.equal(state.stopAt,before.stopAt!+1800000)
+  assert.equal(h.env.execution.signal,signal)
+  assert.equal(state.startedAt,before.startedAt)
+  await h.runner.stop()
+  assert.throws(()=>h.runner.extend(30,state.stopAt!),/没有可延长/)
+})

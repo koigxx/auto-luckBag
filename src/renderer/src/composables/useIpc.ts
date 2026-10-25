@@ -201,6 +201,11 @@ export function useIpc() {
       notify(tr('已停止，后续自动恢复已取消。', 'Stopped. Scheduled resume is cancelled.'))
       return true
     })
+  const extendRun=(minutes:number,stopAt:number)=>action('extend',async()=>{
+    const result=await window.api.autoRun.extend(minutes,stopAt);requireSuccess(result);autoRunState.value=result.state
+    notify(tr('定时结束已延长，原休息和每日上限保持。','Scheduled stop extended. Breaks and daily limits are unchanged.'))
+    return true
+  })
   const finishCurrent=()=>action('finish',async()=>{
     const result=await window.api.autoRun.finish();requireSuccess(result);autoRunState.value=result.state;return true
   })
@@ -238,7 +243,7 @@ export function useIpc() {
     return true
   })
   return {
-    alerts,alertDestination,dismissAlert,finishCurrent,skipCandidate,
+    alerts,alertDestination,dismissAlert,finishCurrent,extendRun,skipCandidate,
     ready,
     isLoggedIn,
     authState,

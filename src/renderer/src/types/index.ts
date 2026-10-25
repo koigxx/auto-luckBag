@@ -65,6 +65,7 @@ export type AutoRunStatus =
   | 'blocked'
 
 export interface AutoRunState {
+  automatic?: boolean
   waitingReason?: string
   resumeRemainingSeconds?: number | null
   session?: SessionRecord

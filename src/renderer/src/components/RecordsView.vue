@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { riskId } from '../../../shared/policy'
 import { computed, ref, watch } from 'vue'
 import type { Insights } from '../../../shared/insights'
 import type { Payment, Policy } from '../../../shared/policy'
@@ -175,7 +176,7 @@ async function confirm() {
     <ReviewSummary part="claims" :data="data" :busy="busy" :on-action="onAction" :language="language" />
       <section v-if="unresolved.length || risks.length" class="review-panel" aria-labelledby="review-title">
         <div class="section-heading">
-          <h2 id="review-title"><UiIcon name="alert" />{{ tr('需要处理', 'Needs attention') }}</h2>
+          <h2 id="review-title"><UiIcon name="alert" />{{ tr('异常待办', 'Issues to resolve') }}</h2>
           <span class="status-pill warning">{{ unresolved.length + risks.length }}</span>
         </div>
         <div v-for="payment in unresolved" :key="payment.id" class="review-row">
@@ -207,10 +208,14 @@ async function confirm() {
             </button>
           </div>
         </div>
-        <div v-for="(risk, index) in risks" :key="index" class="review-row">
+        <div v-for="risk in risks" :key="riskId(risk)" class="review-row">
           <div>
             <strong>{{ risk.reason }}</strong>
-            <p>{{ time(risk.at) }} · {{ risk.source }}</p>
+            <p>{{ time(risk.at) }} · {{ tr('自动运行已停止，等待人工处理', 'Automation stopped; manual handling required') }}</p>
+          </div>
+          <div class="button-row">
+            <button class="button small" :disabled="running || busy[`risk-open:${riskId(risk)}`]" @click="onAction(`risk-open:${riskId(risk)}`,()=>api.insights.openRisk(riskId(risk)))">{{ tr('前往浏览器处理','Open browser to resolve') }}</button>
+            <button class="button small" :disabled="running || !!unresolved.length || busy[`risk-done:${riskId(risk)}`]" @click="onAction(`risk-done:${riskId(risk)}`,()=>api.insights.resolveRisk(riskId(risk)))">{{ tr('已处理，检查并完成','Check and complete') }}</button>
           </div>
         </div>
         <div v-if="risks.length" class="review-footer">
@@ -227,15 +232,7 @@ async function confirm() {
                   )
             }}
           </p>
-          <button
-            class="button"
-            :disabled="running || !!unresolved.length || busy.resolve"
-            @click="onAction('resolve', () => api.insights.resolveRisk())"
-          >
-            {{
-              busy.resolve ? tr('处理中…', 'Working…') : tr('已处理，解除阻断', 'Issue handled; clear hold')
-            }}
-          </button>
+
         </div>
       </section>
     <section class="surface data-surface">

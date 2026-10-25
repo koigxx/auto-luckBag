@@ -20,10 +20,11 @@ export class SessionEngine {
     const duration=(policy.sessionMin+rng()*(policy.sessionMax-policy.sessionMin))*60000
     let allowedEnd=Infinity
     if(policy.allowedStart!==policy.allowedEnd)for(let at=now-now%60000+60000;at<=now+duration;at+=60000){if(!allowedNow(at,policy)){allowedEnd=at;break}}
-    const hardStopAt=Math.min(now+duration,now+policy.dailyMinutes*60000-used,stopAt??Infinity,allowedEnd)
+    const segmentLimitAt=Math.min(now+duration,now+policy.dailyMinutes*60000-used,allowedEnd)
+    const hardStopAt=Math.min(segmentLimitAt,stopAt??Infinity)
     if(this.monotonic)this.lastClockSample={wall:now,monotonic:this.monotonic()}
     return this.repo.change(a=>a.session={...emptySession(),activeByDay:a.session.activeByDay,policy:{...policy},phase:'running',
-      startedAt:now,drainAt:Math.max(now,hardStopAt-90000),hardStopAt,stopAt,nextResumeAt:null,lastTickAt:now,seed,reason:''})
+      segmentLimitAt,startedAt:now,drainAt:Math.max(now,hardStopAt-90000),hardStopAt,stopAt,nextResumeAt:null,lastTickAt:now,seed,reason:''})
   }
   tick(hasRoom: boolean): SessionRecord {
     const now=this.repo.now()
@@ -62,6 +63,26 @@ export class SessionEngine {
       if(now>=(s.hardStopAt??Infinity) || (s.phase==='draining'&&!hasRoom)) {
         const rng=seededRandom(s.seed^0x51f15e)
         s.phase='resting';s.nextResumeAt=now+(p.breakMin+rng()*(p.breakMax-p.breakMin))*60000;s.reason='计划休息'
+      }
+      return s
+    })
+  }
+  extend(minutes: number, expectedStopAt: number): SessionRecord {
+    const now=this.repo.now(), a=this.repo.account(), s=a.session
+    if(!Number.isInteger(minutes)||minutes<1||minutes>120)throw new Error('每次延长时间须为1–120分钟')
+    if(!['running','draining','resting'].includes(s.phase)||s.finishRequested)throw new Error('当前运行已停止、正在检查或已请求结束，不能延长')
+    if(a.risks.some(r=>r.resolvedAt===null)||Object.values(a.payments).some(p=>p.state==='unresolved'))throw new Error('存在待处理异常，不能延长')
+    if(s.stopAt===null||s.stopAt<=now)throw new Error('没有可延长的定时运行，或结束时间已到')
+    if(s.stopAt!==expectedStopAt)throw new Error('结束时间已变化，请重新确认')
+    const stopAt=s.stopAt+minutes*60000
+    if(stopAt-now>1440*60000)throw new Error('定时结束最多可设置到24小时后')
+    // Never reroll a segment, replenish daily time or interrupt an existing rest.
+    return this.repo.change(a=>{
+      const s=a.session
+      s.stopAt=stopAt
+      if(s.phase==='running') {
+        s.hardStopAt=Math.min(s.segmentLimitAt??s.hardStopAt??now,stopAt)
+        s.drainAt=Math.max(s.startedAt??now,s.hardStopAt-90000)
       }
       return s
     })
