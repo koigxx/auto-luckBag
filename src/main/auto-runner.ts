@@ -186,6 +186,14 @@ export class AutoRunner {
       void this.pulse().catch((e) => this.log(e.message))
     })
   }
+  extend(minutes:number, expectedStopAt:number):ReturnType<AutoRunner['getState']> {
+    if(!this.automatic || this.beginning)throw new Error('当前没有可延长的自动运行')
+    const s=this.env.sessionEngine.extend(minutes,expectedStopAt)
+    this.waitingReason=''
+    this.log(`本次定时结束已延长${minutes}分钟，新的结束时间 ${new Date(s.stopAt!).toLocaleString('zh-CN',{timeZone:s.policy.timezone,hour12:false})}；原休息与每日限制保持`)
+    this.publish()
+    return this.getState()
+  }
   async finishCurrent():Promise<ReturnType<AutoRunner['getState']>> {
     if(!['running','draining'].includes(this.getState().status))return this.stop('收尾后停止')
     this.env.sessionEngine.requestFinish()

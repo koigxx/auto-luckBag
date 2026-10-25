@@ -25,7 +25,7 @@ export interface FudaiEnvironment {
   policy: () => Policy
   assertActive: (signal: AbortSignal) => void
   paymentReason: (url: string, cost: number | null) => string | null
-  reportRisk: (reason: string, source: string) => void
+  reportRisk: (reason: string, source: string, url?: string) => void
   canFinish: (drawAt: number) => boolean
   perform: <T>(signal: AbortSignal, fn: () => Promise<T>) => Promise<T>
 }
@@ -134,7 +134,8 @@ export class FudaiService {
     if (!this.ready || this.busy || this.stopped || this.doneReason || this.page.isClosed() || this.signal.aborted) return
     this.busy = true
     this.inFlight = this.step()
-      .catch((e: any) => {
+      .catch(async (e: any) => {
+        await this.observer.checkPageRisk()
         if (!this.signal.aborted && !this.stopped) {
           this.callbacks.onLog(`本页操作停止：${e.message}`)
           this.doneReason = e.message

@@ -1,4 +1,4 @@
-import { AccountData, DEFAULT_POLICY, DecisionRecord, emptySession, Membership, Opportunity, Payment, Policy, RoomProfile, RoundRecord, RuntimeData, UserAlert, normalizeRoomUrl } from '../shared/policy'
+import { AccountData, DEFAULT_POLICY, DecisionRecord, emptySession, Membership, Opportunity, Payment, Policy, RoomProfile, RoundRecord, RuntimeData, UserAlert, normalizeRoomUrl, riskId } from '../shared/policy'
 
 export interface RuntimeStorage { read(): RuntimeData; write(data: RuntimeData): void }
 export const emptyRuntime = (): RuntimeData => ({ version: 2, activeAccount: null, legacyAssigned: false, accounts: {} })
@@ -192,17 +192,24 @@ export class RuntimeRepository {
       if(state==='confirmed') { payment.confirmedAt=this.now();const r=a.rooms[payment.roomUrl]; if(r) { r.everPaid=true;r.memberKnown=true; r.membership='satisfied'; r.membershipAt=this.now() } }
     })
   }
-  risk(reason: string, source: string): void {
+  risk(reason: string, source: string, url?: string): void {
     this.change(a => {
-      if(!a.risks.some(r=>r.resolvedAt===null && r.reason===reason)) a.risks.push({at:this.now(),reason,source,resolvedAt:null})
+      if(!a.risks.some(r=>r.resolvedAt===null && r.reason===reason)) a.risks.push({at:this.now(),reason,source,resolvedAt:null,url: (()=>{try{return url?normalizeRoomUrl(url):undefined}catch{return undefined}})()})
       a.session.phase='blocked'; a.session.reason=reason; a.session.nextResumeAt=null
     })
   }
-  resolveRisk(): void {
+  resolveRisk(id?: string): void {
     this.change(a => {
-      if(Object.values(a.payments).some(p=>p.state==='unresolved')) throw new Error('请先核对未决支付')
-      for(const r of a.risks) if(r.resolvedAt===null) r.resolvedAt=this.now()
-      a.session.phase='stopped'; a.session.reason='风险已确认处理，等待手动启动'
+      if(!['blocked','stopped'].includes(a.session.phase))throw new Error('请先停止运行')
+      if(Object.values(a.payments).some(p=>['reserved','submitted','unresolved'].includes(p.state))) throw new Error('请先核对未决支付')
+      if(id && !a.risks.some(r=>riskId(r)===id && r.resolvedAt===null))throw new Error('待办已处理或不存在')
+      for(const r of a.risks) if(r.resolvedAt===null && (!id || riskId(r)===id)) {
+        r.resolvedAt=this.now()
+        const alert=a.alerts?.find(n=>n.id===riskId(r));if(alert)alert.dismissedAt=this.now()
+      }
+      a.session.nextResumeAt=null
+      a.session.phase=a.risks.some(r=>r.resolvedAt===null)?'blocked':'stopped'
+      a.session.reason=a.session.phase==='blocked'?'仍有异常待办需要处理':'风险已确认处理，等待手动启动'
     })
   }
   decision(d: Omit<DecisionRecord,'at'>): void { this.change(a=>{

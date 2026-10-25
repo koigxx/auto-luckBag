@@ -11,7 +11,7 @@ import ActivityLog from './components/ActivityLog.vue'
 import './styles.css'
 
 const {
-  alerts,alertDestination,dismissAlert,finishCurrent,skipCandidate,
+  alerts,alertDestination,dismissAlert,finishCurrent,extendRun,skipCandidate,
   ready,
   isLoggedIn,
   authState,
@@ -301,6 +301,7 @@ async function recordAction(
             @start="startAutoRun"
             @stop="stopAutoRun"
             @finish="finishCurrent"
+            @extend="extendRun"
             @skip="skipCandidate"
             @settings="view = 'settings'"
             @records="view = 'records'"
@@ -354,7 +355,7 @@ async function recordAction(
     <aside v-if="alerts.length" class="alert-toast" role="status" aria-live="polite">
       <div class="section-heading"><small>{{ tr('福袋助手', 'Lucky Bag') }} · {{ alerts.length }} {{ tr('条提醒','notifications') }}</small><button class="icon-button" aria-label="稍后查看提醒" @click="dismissAlert(alerts[0].id)"><UiIcon name="close" :size="16" /></button></div>
       <strong>{{ alerts[0].title }}</strong><p>{{ alerts[0].message }}</p>
-      <button class="button small" @click="view=alerts[0].kind==='login'?'dashboard':'records';dismissAlert(alerts[0].id)">{{ alerts[0].kind==='login'?tr('返回登录','Sign in'):tr('查看记录','View records') }}</button>
+      <button class="button small" @click="view=alerts[0].kind==='login'?'dashboard':'records';dismissAlert(alerts[0].id)">{{ alerts[0].kind==='login'?tr('返回登录','Sign in'):alerts[0].kind==='risk'?tr('查看异常待办','View issue'):tr('查看记录','View records') }}</button>
     </aside>
     <UiDialog
       :open="manualOpen"

@@ -6,7 +6,8 @@ export interface API {
     get: () => Promise<import('../../../shared/insights').Insights | null>
     room: (url: string, patch: Record<string, boolean>) => Promise<{success:boolean;error?:string}>
     payment: (id: string, state: 'confirmed' | 'failed') => Promise<{success:boolean;error?:string}>
-    resolveRisk: () => Promise<{success:boolean;error?:string}>
+    openRisk: (id:string) => Promise<{success:boolean;error?:string}>
+    resolveRisk: (id:string) => Promise<{success:boolean;error?:string}>
     export: () => Promise<{success:boolean;error?:string;path?:string}>
   }
   auth: {
@@ -35,6 +36,7 @@ export interface API {
     reset: () => Promise<import('./index').RunStats>
   }
   autoRun: {
+    extend:(minutes:number,stopAt:number)=>Promise<{success:boolean;error?:string;state:import('./index').AutoRunState}>
     finish:()=>Promise<{success:boolean;error?:string;state:import('./index').AutoRunState}>
     skip:(url:string,id:string,today:boolean)=>Promise<{success:boolean;error?:string;state:import('./index').AutoRunState}>
     start: (options?: {

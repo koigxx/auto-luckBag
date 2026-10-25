@@ -18,6 +18,13 @@ export function recordTotals(rounds: RoundRecord[], payments: Payment[]) {
   }
 }
 
+// Called only for discovery anchor text, whose card layout includes title/host/viewers.
+export function discoveryRoomName(text: string): string {
+  const clean=text.replace(/\s+/g,' ').trim()
+  const card=clean.match(/^.+?\s+@\s*(.+?)\s+\d+(?:\.\d+)?[万亿]?$/u)
+  return (card?.[1]?.trim() || clean).slice(0,80)
+}
+
 export function roomDisplayName(name: string | undefined, url: string, english = false): string {
   let clean = name?.replace(/\s+/g, ' ').trim()
   // Only strip the known discovery-card envelope, not arbitrary @ or digits in nicknames.

@@ -155,6 +155,7 @@ export interface Payment {
 export type SessionPhase = 'stopped' | 'running' | 'draining' | 'resting' | 'resume-check' | 'blocked'
 export interface SessionRecord {
   finishRequested?: boolean
+  segmentLimitAt?: number // Original segment/daily/allowed-hours ceiling, excluding the user timer.
   phase: SessionPhase
   startedAt: number | null
   drainAt: number | null
@@ -167,7 +168,8 @@ export interface SessionRecord {
   seed: number
   policy: Policy
 }
-export interface RiskRecord { at: number; reason: string; source: string; resolvedAt: number | null }
+export interface RiskRecord { at: number; reason: string; source: string; resolvedAt: number | null; url?: string }
+export const riskId = (risk: RiskRecord): string => `risk:${risk.at}:${risk.source}:${risk.reason}`
 export interface DecisionRecord { at: number; url: string; action: string; reason: string; score: number | null; probability: number | null; seed?: number; snapshot?: {version:2;opportunity:Opportunity;leadSeconds:number;utility:number;mode:string;sampleCount:number} }
 export interface RunRecord {
   silentEnd?: boolean
@@ -176,7 +178,7 @@ export interface RunRecord {
   skipReasons: Record<string, number>
 }
 export interface UserAlert {
-  id: string; kind: 'login' | 'claim' | 'ended'; title: string; message: string; at: number; dismissedAt: number | null
+  id: string; kind: 'login' | 'claim' | 'ended' | 'risk'; title: string; message: string; at: number; dismissedAt: number | null
 }
 export interface AccountData {
   runs?: RunRecord[]

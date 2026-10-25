@@ -309,6 +309,7 @@ module.exports = async function verifyUI(config, output) {
         },
         alerts:{dismiss:async(id)=>{count('dismissAlert');fixture.insights.alerts=(fixture.insights.alerts||[]).filter(n=>n.id!==id);emit('alerts:update',fixture.insights.alerts);return {success:true}}},
         autoRun: {
+          extend:async(minutes,stopAt)=>{count('extend');if(stopAt!==fixture.state.stopAt)return {success:false,error:'stale'};fixture.state.stopAt+=minutes*60000;fixture.state.session.stopAt=fixture.state.stopAt;return {success:true,state:copy(fixture.state)}},
           finish:async()=>{count('finish');fixture.phase('draining');fixture.state.session.finishRequested=true;return {success:true,state:copy(fixture.state)}},
           skip:async(url,id,today)=>{count(today?'skipToday':'skipRound');fixture.state.candidates=fixture.state.candidates.filter(c=>c.url!==url);return {success:true,state:copy(fixture.state)}},
           status: async () => copy(fixture.state),
@@ -347,6 +348,7 @@ module.exports = async function verifyUI(config, output) {
             fixture.insights.payments.find((p) => p.id === id).state = state
             return { success: true }
           },
+          openRisk: async () => {count('openRisk');return {success:true}},
           resolveRisk: async () => {
             fixture.insights.risks.forEach((r) => {
               r.resolvedAt = now
@@ -606,7 +608,7 @@ module.exports = async function verifyUI(config, output) {
       window.__fixture.phase('blocked')
     })
     await nav('运行记录').click()
-    await page.getByRole('heading', { name: '需要处理', exact: true }).waitFor({ timeout: 8000 })
+    await page.getByRole('heading', { name: '异常待办', exact: true }).waitFor({ timeout: 8000 })
     await nav('运行面板').click()
     check(
       await page.getByRole('button', { name: '手动参与', exact: true }).isDisabled(),
@@ -614,9 +616,11 @@ module.exports = async function verifyUI(config, output) {
     )
     await nav('运行记录').click()
     check(
-      await page.getByRole('button', { name: '已处理，解除阻断', exact: true }).isDisabled(),
+      await page.getByRole('button', { name: '已处理，检查并完成', exact: true }).isDisabled(),
       'unresolved charges keep risk resolution disabled'
     )
+    await page.getByRole('button',{name:'前往浏览器处理',exact:true}).click()
+    check((await page.evaluate(()=>window.__fixture.calls.openRisk))===1,'issue todo exposes the manual browser action')
     await page.getByRole('button', { name: '核实未扣款', exact: true }).click()
     check(await page.getByRole('dialog').isVisible(), 'reconciliation requires an explicit review dialog')
     await page.getByRole('dialog').getByRole('button', { name: '取消', exact: true }).click()
@@ -799,9 +803,20 @@ module.exports = async function verifyUI(config, output) {
     await page.locator('.reservation-details summary').click()
     await page.getByRole('button',{name:'今天跳过',exact:true}).click()
     check((await page.evaluate(()=>window.__fixture.calls.skipToday))===1,'skip today dispatches once')
+    await page.evaluate(()=>{const f=window.__fixture;f.state.automatic=true;f.state.stopAt=Date.now()+600000;f.state.session.stopAt=f.state.stopAt;f.state.session.finishRequested=false;f.emit('auto-run:update',f.state)})
+    await page.getByRole('button',{name:'延长时间',exact:true}).click()
+    check(await page.locator('#extend-run').isVisible(),'extension preview opens separately from stop controls')
+    await page.getByLabel('增加时长',{exact:true}).selectOption('15')
+    const oldEnd=await page.evaluate(()=>window.__fixture.state.stopAt)
+    await page.screenshot({path:path.join(output,'ui-extend-run.png'),fullPage:true,animations:'disabled'})
+    await page.getByRole('button',{name:'确认延长',exact:true}).click()
+    await page.locator('#extend-run').waitFor({state:'hidden'})
+    check((await page.evaluate(()=>window.__fixture.state.stopAt))===oldEnd+900000,'extension adds selected minutes to original deadline')
+    check((await page.evaluate(()=>window.__fixture.calls.extend))===1,'extension dispatches once')
     await page.getByRole('button',{name:'本轮结束后停止',exact:true}).click()
     check((await page.evaluate(()=>window.__fixture.calls.finish))===1,'graceful stop is separate from immediate stop')
     check(await page.getByRole('button',{name:'正在等待本轮结束',exact:true}).isDisabled(),'finish request cannot repeat')
+    check(await page.getByRole('button',{name:'延长时间',exact:true}).count()===0,'finish request hides extension')
     await page.goto('https://fixture.local/?auth=expired')
     await page.getByRole('heading',{name:'登录已失效，请重新登录'}).waitFor()
     check(await page.getByRole('button',{name:'登录抖音',exact:true}).first().isVisible(), 'explicit expiry offers manual login')

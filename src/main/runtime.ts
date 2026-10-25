@@ -52,9 +52,9 @@ export async function haltPages(): Promise<void> {
   execution.stop()
   await Promise.allSettled([...stopListeners].map((fn) => fn()))
 }
-export function reportRisk(reason: string, source: string): void {
+export function reportRisk(reason: string, source: string, url?: string): void {
   if (!repository.read().activeAccount) return
-  repository.risk(reason, source)
+  repository.risk(reason, source, url)
   execution.stop()
   void haltPages()
 }

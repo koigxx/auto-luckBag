@@ -1,4 +1,4 @@
-import { roomDisplayName } from '../shared/record-presentation'
+import { roomDisplayName, discoveryRoomName } from '../shared/record-presentation'
 import { Page, Response } from 'playwright'
 import { BrowserManager } from './browser-manager'
 import { Opportunity, normalizeRoomUrl, SOURCE_TO_FIRST_ROOM_SECONDS, VERIFICATION_MAX_SECONDS, RETURN_VERIFICATION_MAX_SECONDS } from '../shared/policy'
@@ -75,7 +75,7 @@ export class DiscoveryService {
       try {
         const normalized = normalizeRoomUrl(url),
           old = rooms.get(normalized),
-          label = name.replace(/\s+/g, ' ').trim().slice(0, 80)
+          label = discoveryRoomName(name)
         rooms.set(normalized, {
           url: normalized,
           name: label && label !== '直播中' ? label : old?.name || normalized,
@@ -217,6 +217,7 @@ export class DiscoveryService {
         observer: keep ? observer : undefined
       }
     } catch (error) {
+      await observer.checkPageRisk()
       if (!signal.aborted) {
         if (navigated) repository.visit(url, false)
         const reason = `验证异常：${error instanceof Error ? error.message : String(error)}`

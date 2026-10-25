@@ -3,6 +3,7 @@ import fs from 'fs'
 import { execution, assertActive, perform, onHalt } from './runtime'
 import { checkSignal } from './execution-gate'
 import { ROOM_NAVIGATION_TIMEOUT_SECONDS } from '../shared/policy'
+import { ManualReviewBrowser } from './manual-review-browser'
 
 export class BrowserManager {
   private closing=false
@@ -13,6 +14,10 @@ export class BrowserManager {
   private creating: Promise<BrowserContext> | null = null
   private storageStatePath: string | null = null
   private pages = new Set<Page>()
+  private manualReview = new ManualReviewBrowser(()=>this.getContext())
+  openManualReview(url:string,account:string):Promise<void>{return this.manualReview.openManualReview(url,account)}
+  checkManualReview(account:string):Promise<void>{return this.manualReview.checkManualReview(account)}
+  closeManualReview():Promise<void>{return this.manualReview.closeManualReview()}
   constructor() { onHalt(() => this.closeManagedPages()) }
   setStorageStatePath(path: string): void { this.storageStatePath = path }
   getExistingContext(): BrowserContext | null { return this.context }
@@ -59,6 +64,7 @@ export class BrowserManager {
   async closeManagedPages(): Promise<void> { await Promise.allSettled([...this.pages].map(p => p.close())); this.pages.clear() }
   async closeContext(): Promise<void> {
     this.closing=true
+    await this.closeManualReview()
     await this.creating?.catch(() => {})
     await this.context?.close().catch(() => {})
     this.context = null

@@ -11,7 +11,7 @@ import { StatsService } from './stats-service'
 import { AutoRunner } from './auto-runner'
 import { currentBudget,policy,repository,setExecutionLogger } from './runtime'
 import { validateConfigPatch } from '../shared/config-validation'
-import { normalizeRoomUrl } from '../shared/policy'
+import { normalizeRoomUrl, riskId } from '../shared/policy'
 import { runReports,budgetCycles } from '../shared/review'
 import { dayKey } from './runtime-repository'
 
@@ -51,8 +51,9 @@ export function setupIpcHandlers(win:BrowserWindow,_browser:BrowserManager,auth:
   })
   ipcMain.handle('runStats:get',()=>stats.getStats())
   ipcMain.handle('runStats:reset',()=>stats.reset())
-  ipcMain.handle('autoRun:start',safe(async(options={})=>({success:true,state:await runner.start(options)})))
+  ipcMain.handle('autoRun:start',safe(async(options={})=>{await _browser.closeManualReview();return {success:true,state:await runner.start(options)}}))
   ipcMain.handle('autoRun:stop',safe(async()=>({success:true,state:await runner.stop()})))
+  ipcMain.handle('autoRun:extend',safe((minutes:number,stopAt:number)=>({success:true,state:runner.extend(minutes,stopAt)})))
   ipcMain.handle('autoRun:finish',safe(async()=>({success:true,state:await runner.finishCurrent()})))
   ipcMain.handle('autoRun:skip',safe((url:string,id:string,today:boolean)=>{
     if(typeof url!=='string'||typeof id!=='string'||typeof today!=='boolean')throw new Error('无效候选操作')
@@ -93,7 +94,33 @@ export function setupIpcHandlers(win:BrowserWindow,_browser:BrowserManager,auth:
     repository.decision({url:'',action:'reconcile',reason:`用户核对支付为 ${state}`,score:null,probability:null})
     return {success:true}
   }))
-  ipcMain.handle('insights:resolveRisk',safe(()=>{repository.resolveRisk();send('auto-run:update',runner.getState());return {success:true}}))
+  const reviewRisk=(id:string)=>{
+    if(typeof id!=='string')throw new Error('请选择具体异常待办')
+    const risk=repository.account().risks.find(r=>riskId(r)===id && r.resolvedAt===null)
+    if(!risk)throw new Error('待办已处理或不存在')
+    if(runner.getState().running || rooms.getAllRooms().length)throw new Error('请等待自动任务停止后再处理')
+    return risk
+  }
+  ipcMain.handle('insights:openRisk',safe(async(id:string)=>{
+    const risk=reviewRisk(id),account=repository.read().activeAccount!
+    await runner.stop(risk.reason)
+    if(repository.read().activeAccount!==account)throw new Error('账号已变化，请重新打开待办')
+    await _browser.openManualReview(risk.url?normalizeRoomUrl(risk.url):'https://live.douyin.com',account)
+    return {success:true}
+  }))
+  ipcMain.handle('insights:resolveRisk',safe(async(id:string)=>{
+    const risk=reviewRisk(id),account=repository.read().activeAccount!
+    if(risk.source!=='payment'){
+      await _browser.checkManualReview(account)
+      if(!await auth.restoreSession(true) || repository.read().activeAccount!==account)
+        throw new Error('登录或账号状态尚未确认，待办保持未完成')
+      await _browser.checkManualReview(account)
+      await auth.saveSession()
+    }
+    if(repository.read().activeAccount!==account)throw new Error('账号已变化，请重新检查待办')
+    reviewRisk(id)
+    repository.resolveRisk(id);send('auto-run:update',runner.getState());return {success:true}
+  }))
   ipcMain.handle('insights:export',safe(async()=>{
     const result=await dialog.showSaveDialog(win,{defaultPath:'luckbag-review.json',filters:[{name:'JSON',extensions:['json']}]})
     if(result.canceled||!result.filePath)return {success:false,error:'已取消导出'}

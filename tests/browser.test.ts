@@ -9,6 +9,8 @@ import { DEFAULT_POLICY, Opportunity } from '../src/shared/policy'
 import { defaults } from '../src/shared/config'
 import { checkSignal } from '../src/main/execution-gate'
 import { parseLottery } from '../src/main/lottery-parser'
+import { visiblePageRisk } from '../src/main/page-risk'
+import { ManualReviewBrowser } from '../src/main/manual-review-browser'
 
 let browser: Browser
 before(async () => {
@@ -18,6 +20,66 @@ after(async () => {
   await browser?.close()
 })
 const url = 'https://live.douyin.com/12345678'
+test('visible slider and phone challenges block, hidden templates and ordinary chat do not',async()=>{
+  const p=await page('<div id="captcha_container" style="width:400px;height:300px">请完成下列验证后继续</div>')
+  try {
+    assert.match(await visiblePageRisk(p),/请完成下列验证/)
+    await p.locator('#captcha_container').evaluate(el=>el.textContent='请填写手机验证码')
+    assert.match(await visiblePageRisk(p),/手机验证码/)
+    await p.locator('#captcha_container').evaluate(el=>el.style.display='none')
+    await p.evaluate(()=>{const div=document.createElement('div');div.textContent='聊天提到手机验证码';document.body.append(div)})
+    assert.equal(await visiblePageRisk(p),'')
+  }finally{await p.context().close()}
+})
+
+test('challenge appearing during a click is escalated instead of retried as an ordinary error',async()=>{
+  const p=await page(css+'<div class="lottery-dialog">福袋参与条件<button>一键评论</button></div>')
+  const h=harness(p,{requiresComment:true,commentText:'fixture'})
+  try{
+    await h.service.tick()
+    ;(h.service as any).dom.comment=async()=>{
+      await p.evaluate(()=>{const d=document.createElement('div');d.id='captcha_container';d.style.cssText='width:400px;height:300px';d.textContent='请完成下列验证后继续';document.body.append(d)})
+      throw new Error('elementHandle.click: captcha_container intercepts pointer events')
+    }
+    await h.service.tick()
+    assert.equal(h.repo.account().session.phase,'blocked')
+    assert.equal(h.controller.signal.aborted,true)
+    assert.equal(h.risks.length,1)
+    assert.ok(!h.logs.some(m=>m.includes('elementHandle.click')))
+  }finally{await h.finish()}
+})
+
+test('visible iframe phone verification is detected but hidden iframe templates are ignored',async()=>{
+  const p=await page('<iframe style="width:500px;height:400px" srcdoc="<div role=dialog style=width:300px;height:200px>短信验证码</div>"></iframe>')
+  try {
+    await p.frameLocator('iframe').locator('[role=dialog]').waitFor()
+    assert.match(await visiblePageRisk(p),/短信验证码/)
+    await p.locator('iframe').evaluate(el=>el.style.display='none')
+    assert.equal(await visiblePageRisk(p),'')
+  }finally{await p.context().close()}
+})
+
+test('manual review reuses the task context, never enters values, and checks visible challenges',async()=>{
+  const p=await page('<div role="dialog" style="width:400px;height:300px">手机验证码<input id="code"></div>')
+  const review=new ManualReviewBrowser(async()=>p.context())
+  try{
+    await p.context().addCookies([{name:'fixture',value:'same-session',url}])
+    await Promise.all([review.openManualReview(url,'a'),review.openManualReview(url,'a')])
+    assert.equal(p.context().pages().length,2)
+    await review.openManualReview(url,'a')
+    assert.equal(p.context().pages().length,2)
+    const manual=p.context().pages()[1]
+    assert.equal(await manual.locator('#code').inputValue(),'')
+    assert.equal((await manual.context().cookies()).find(c=>c.name==='fixture')?.value,'same-session')
+    await assert.rejects(review.checkManualReview('a'),/仍显示/)
+    await assert.rejects(review.checkManualReview('b'),/保持处理页面打开/)
+    await manual.locator('[role=dialog]').evaluate(el=>el.remove())
+    await review.checkManualReview('a')
+    await review.closeManualReview()
+    await assert.rejects(review.checkManualReview('a'),/先前往/)
+    assert.equal(p.isClosed(),false)
+  }finally{await p.context().close()}
+})
 const css =
   '<style>.lottery-dialog{width:340px;height:250px;margin:60px;padding:10px;background:#eee}button{width:160px;height:36px}#ShortTouchLayout .ycjwPFJI{width:60px;height:30px}</style>'
 async function page(html: string): Promise<Page> {

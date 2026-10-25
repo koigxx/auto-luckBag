@@ -2044,3 +2044,11 @@ td small {
 .stage-track > span { display: block; height: 100%; background: #247458; }
 .stage-track.indeterminate { background: repeating-linear-gradient(110deg,#bad6c9 0px,#bad6c9 5px,#e9f2ee 5px,#e9f2ee 10px); }
 .stage-draw-note { display: block; text-align: right; margin-top: 6px; color: #788292; font-size: 11px; }
+
+.extend-run { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 14px; padding-top: 16px; border-top: 1px solid var(--border); }
+.extend-run > div:first-child { flex: 1 1 100%; }
+.extend-run p { margin-top: 6px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.extend-run label { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+.extend-run select { padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: inherit; }
+.extend-preview { display: flex; flex-wrap: wrap; gap: 8px; font-size: 13px; font-variant-numeric: tabular-nums; }
+.extend-preview span { color: var(--muted); }
