@@ -19,8 +19,11 @@ export function recordTotals(rounds: RoundRecord[], payments: Payment[]) {
 }
 
 export function roomDisplayName(name: string | undefined, url: string, english = false): string {
-  const clean = name?.trim()
-  if (clean && !['直播中', '直播间'].includes(clean) && !/^https?:\/\//i.test(clean)) return clean
+  let clean = name?.replace(/\s+/g, ' ').trim()
+  // Only strip the known discovery-card envelope, not arbitrary @ or digits in nicknames.
+  const card = clean?.match(/^你的关注\s+.+?\s+@\s*(.+?)\s+\d+(?:\.\d+)?[万亿]?$/u)
+  if (card) clean = card[1].trim()
+  if (clean && !['直播中', '直播间', '点击进入直播间', '进入直播间', '点击进入'].includes(clean) && !/^https?:\/\//i.test(clean)) return clean
   if (!url) return english ? 'System' : '系统'
   try {
     const id = new URL(url).pathname.split('/').filter(Boolean).pop()

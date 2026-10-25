@@ -644,6 +644,8 @@ test('planned rest resumes only after current checks, and restart is a fresh ses
   assert.equal(h.repo.account().session.phase, 'running')
   assert.notEqual(h.repo.account().session.startedAt, first)
   assert.equal(h.env.execution.signal.aborted, false)
+  assert.equal(h.logs.filter(m => !m.trim()).length, 0)
+  assert.equal(h.logs.filter(m => m.includes('休息结束，检查通过')).length, 1)
   await h.runner.stop()
 })
 
