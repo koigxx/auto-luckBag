@@ -288,7 +288,12 @@ export class FudaiService {
       if (now - this.lastOpenAt >= (this.rounds > 0 ? 3000 : 15000)) {
         this.lastOpenAt = now
         await this.dom.reopen()
-        this.callbacks.onLog(`等待关闭上一轮结果弹窗：${this.dom.lastOpenResult}`)
+        const closed = await this.dom.panelIsClosed()
+        const snapshot = await this.dom.panelSnapshot()
+        const phase = closed || (snapshot.text && !snapshot.resultPanel)
+          ? '上一轮结果弹窗已关闭，等待新轮入口或身份确认'
+          : '上一轮结果弹窗仍可见，等待安全关闭'
+        this.callbacks.onLog(`${phase}：${this.dom.lastOpenResult}`)
       }
       return
     }
@@ -449,8 +454,25 @@ export class FudaiService {
       this.observer.lastChatSuccess < this.commentStarted
     ) {
       this.showPhase('等待评论反馈')
-      if (this.env.now() - this.commentStarted > 10000)
+      if (this.env.now() - this.commentStarted > 10000) {
         this.doneReason = '评论未获得业务成功反馈，停止本轮以防重复发送'
+        // Set the terminal reason first: diagnostic failures must never enable another action.
+        try {
+          const snapshot = await this.dom.panelSnapshot()
+          this.callbacks.onLog(`评论反馈超时诊断：${JSON.stringify({
+            waitedSeconds: Math.round((this.env.now() - this.commentStarted) / 1000),
+            latestMatches: this.observer.latest?.lotteryId === o.lotteryId,
+            rightsMatch: this.observer.panelLotteryId === o.lotteryId,
+            panelIdMatches: snapshot.lotteryId ? snapshot.lotteryId === o.lotteryId : null,
+            panelReadable: !!snapshot.text, resultPanel: snapshot.resultPanel,
+            commentTaskPending: o.requiresComment,
+            commentButtonVisible: await this.dom.hasCommentAction(),
+            ownResult: this.resultReadReason
+          })}；${await this.dom.panelDiagnostics()}；${this.observer.identityDiagnostics()}`)
+        } catch {
+          this.callbacks.onLog('评论反馈超时诊断：页面状态读取失败；本轮已停止，不重发任务')
+        }
+      }
       return
     }
     if (o.membership === 'needs-payment' && !this.sent.has('payment')) {

@@ -293,8 +293,10 @@ export class AutoRunner {
           })
       }
     }
-    if (before !== this.env.repository.account().session.phase)
-      this.log(sessionDisplayReason(this.env.repository.account().session))
+    if (before !== this.env.repository.account().session.phase) {
+      const reason = sessionDisplayReason(this.env.repository.account().session)
+      if (reason.trim()) this.log(reason)
+    }
     this.stats.publish()
     this.publish()
   }

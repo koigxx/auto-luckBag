@@ -37,6 +37,9 @@ export class PassiveObserver {
     if (!this.alive || this.signal.aborted) return
     this.requestTimes.set(request, Date.now())
     this.paymentNote(request, '已发出，尚无响应')
+    const url = new URL(request.url())
+    if ((url.hostname === 'douyin.com' || url.hostname.endsWith('.douyin.com')) && /^\/webcast\/room\/chat\/?$/.test(url.pathname))
+      this.note(url.pathname, '评论请求已发出，等待业务反馈')
   }
   // Endpoint paths and processing stages only: never retain query strings,
   // headers, request bodies, response payloads or account credentials here.
@@ -69,14 +72,14 @@ export class PassiveObserver {
     if (!this.alive || this.signal.aborted) return
     this.paymentNote(request, '请求失败')
     const url = new URL(request.url())
-    if ((url.hostname === 'douyin.com' || url.hostname.endsWith('.douyin.com')) && /\/(?:lottery|gift\/send)\//.test(url.pathname))
+    if ((url.hostname === 'douyin.com' || url.hostname.endsWith('.douyin.com')) && /\/(?:lottery|gift\/send|room\/chat)\//.test(url.pathname))
       this.note(url.pathname, '请求失败，未收到完整响应')
   }
   private response = (response: Response): void => {
     void this.readResponse(response).catch(() => {
       if (!this.alive || this.signal.aborted) return
       const url = new URL(response.url())
-      if ((url.hostname === 'douyin.com' || url.hostname.endsWith('.douyin.com')) && /\/(?:lottery|gift\/send)\//.test(url.pathname))
+      if ((url.hostname === 'douyin.com' || url.hostname.endsWith('.douyin.com')) && /\/(?:lottery|gift\/send|room\/chat)\//.test(url.pathname))
         this.note(url.pathname, '响应处理异常')
     })
   }
@@ -87,6 +90,7 @@ export class PassiveObserver {
     if (!(url.hostname === 'douyin.com' || url.hostname.endsWith('.douyin.com'))) return
     const lotteryPath = /\/lottery\//.test(url.pathname)
     const paymentPath = /^\/webcast\/gift\/send\/?$/.test(url.pathname)
+    const chatPath = /^\/webcast\/room\/chat\/?$/.test(url.pathname)
     if (!url.pathname.startsWith('/webcast/')) {
       if (lotteryPath) this.note(url.pathname, '路径不在已支持范围内')
       return
@@ -104,9 +108,9 @@ export class PassiveObserver {
       this.panelLotteryId = null
       this.panelIdentityReason = '已收到弹窗响应，正在读取内容'
     }
-    if (lotteryPath || paymentPath) this.note(url.pathname, `HTTP ${response.status()}，正在读取内容`)
+    if (lotteryPath || paymentPath || chatPath) this.note(url.pathname, `HTTP ${response.status()}，正在读取内容`)
     const failed = (reason: string): void => {
-      if (lotteryPath || paymentPath) this.note(url.pathname, reason)
+      if (lotteryPath || paymentPath || chatPath) this.note(url.pathname, reason)
       if (isRight && requestAt === this.newestPanelRequestAt) this.panelIdentityReason = reason
     }
     if(response.status()===429){failed('HTTP 429，请求限流');this.reportRisk('服务返回请求限流','response');return}
@@ -118,6 +122,9 @@ export class PassiveObserver {
     if (!json || typeof json !== 'object') { failed('响应缺少对象结构'); return }
     const code = Number(json.status_code)
     const success = json.status_code === 0 || json.status_code === '0'
+    if (chatPath) this.note(url.pathname, response.ok() && success ? '评论业务成功' :
+      json.status_code !== null && json.status_code !== '' && Number.isFinite(code) && code !== 0
+        ? '评论业务返回失败' : '评论未获得明确业务成功反馈')
     const error = riskFromText(String(json.status_msg || json.message || json.prompt || ''))
     if (code === 95152 || (code !== 0 && error)) { this.reportRisk(error || `服务返回限制代码 ${code}`, 'response'); return }
     if (paymentPath) {

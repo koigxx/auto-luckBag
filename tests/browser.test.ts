@@ -763,8 +763,63 @@ test('when both task buttons are visible one-click comment takes priority and is
     h.advance(11000)
     await h.service.tick()
     assert.match(h.service.doneReason, /评论未获得业务成功反馈/)
+    const diagnostic = h.logs.find(m => m.startsWith('评论反馈超时诊断：'))!
+    assert.ok(diagnostic)
+    assert.match(diagnostic, /"panelReadable":true/)
+    assert.match(diagnostic, /"commentButtonVisible":true/)
+    assert.match(diagnostic, /"rightsMatch":true/)
+    assert.ok(!diagnostic.includes('测试'))
+    await h.service.tick()
+    assert.equal(h.logs.filter(m => m.startsWith('评论反馈超时诊断：')).length, 1)
     assert.deepEqual(await p.evaluate(() => (window as any).calls), ['comment'])
   } finally { await h.finish() }
+})
+
+test('comment diagnostic read failure keeps the terminal guard and never retries payment or comment', async () => {
+  const p=await page(css+'<div class="lottery-dialog">福袋参与条件<button>一键评论</button></div>')
+  const h=harness(p,{requiresComment:true,commentText:'private-command',membership:'needs-payment',cost:1})
+  try {
+    await h.service.tick(); await h.service.tick()
+    ;(h.service as any).dom.panelDiagnostics=async()=>{throw new Error('fixture')}
+    h.advance(11000); await h.service.tick(); await h.service.tick()
+    assert.match(h.service.doneReason,/评论未获得业务成功反馈/)
+    assert.ok(h.logs.some(m=>m.includes('页面状态读取失败；本轮已停止')))
+    assert.equal(Object.values(h.repo.account().payments).length,0)
+  } finally {await h.finish()}
+})
+
+test('next-round logs distinguish a retained result from a closed result without a new entry',async()=>{
+  for (const canClose of [true,false]) {
+    const p=await page(css+'<div class="lottery-dialog">福袋 已参与，等待开奖</div>'),h=harness(p)
+    try {
+      await h.service.tick(); await h.service.tick(); h.advance(120000)
+      await p.locator('.lottery-dialog').evaluate((el,close)=>{
+        el.id='short_touch_land_lottery_land_result'
+        el.innerHTML='没抽中福袋<br>查看幸运观众'+(close?'<button onclick="this.parentElement.remove()">知道了</button>':'')
+      },canClose)
+      await h.service.tick(); h.advance(3000); await h.service.tick()
+      assert.ok(h.logs.some(m=>m.includes(canClose?'上一轮结果弹窗已关闭':'上一轮结果弹窗仍可见')),JSON.stringify(h.logs))
+      if(canClose)assert.ok(h.logs.some(m=>m.includes('没有找到可见的福袋入口')))
+    }finally{await h.finish()}
+  }
+})
+
+test('comment response diagnostics distinguish failure and malformed feedback without leaking content',async()=>{
+  const p=await page(css+'<div class="lottery-dialog">福袋</div>'),h=harness(p)
+  try {
+    for (const [body,expected] of [
+      ['{"status_code":1,"message":"private-message"}','评论业务返回失败'],
+      ['not-json-private-message','响应不是有效的 JSON'],
+      ['{"status_code":0}','评论业务成功']
+    ]) {
+      await p.route('**/webcast/room/chat/**',route=>route.fulfill({status:200,body}))
+      await p.evaluate(()=>fetch('/webcast/room/chat/?secret=private-query',{method:'POST',body:'private-command'}))
+      await eventually(()=>h.service.observer.identityDiagnostics().includes(expected))
+      assert.ok(!h.service.observer.identityDiagnostics().includes('private-'))
+      if(expected!=='评论业务成功')assert.equal(h.service.observer.lastChatSuccess,0)
+      await p.unroute('**/webcast/room/chat/**')
+    }
+  }finally{await h.finish()}
 })
 
 test('fan-first waits for delayed comment without chat fallback or a second payment', async () => {

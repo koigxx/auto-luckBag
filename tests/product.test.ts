@@ -22,6 +22,10 @@ function fixture(){let data=emptyRuntime(),now=Date.UTC(2026,9,25,2);const repo=
 test('record room titles preserve known names and use room IDs without inventing names',()=>{
   assert.equal(roomDisplayName(' 某主播 ',url),'某主播')
   assert.equal(roomDisplayName('直播中',url),'直播间 12345678')
+  assert.equal(roomDisplayName('点击进入直播间',url),'直播间 12345678')
+  assert.equal(roomDisplayName('你的关注 示例直播标题 @测试主播 1.2万',url),'测试主播')
+  assert.equal(roomDisplayName('你的关注 示例直播标题 @主播 2026 1234',url),'主播 2026')
+  assert.equal(roomDisplayName('主播 @名字 123',url),'主播 @名字 123')
   assert.equal(roomDisplayName(undefined,url,true),'Room 12345678')
   assert.equal(roomDisplayName(url,url),'直播间 12345678')
   assert.equal(roomDisplayName(undefined,''),'系统')
