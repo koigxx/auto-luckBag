@@ -1,3 +1,4 @@
+import { roomDisplayName } from '../shared/record-presentation'
 import { Page, Response } from 'playwright'
 import { BrowserManager } from './browser-manager'
 import { Opportunity, normalizeRoomUrl, SOURCE_TO_FIRST_ROOM_SECONDS, VERIFICATION_MAX_SECONDS, RETURN_VERIFICATION_MAX_SECONDS } from '../shared/policy'
@@ -131,6 +132,7 @@ export class DiscoveryService {
     this.pages.add(page)
     const observer = new PassiveObserver(page, signal, reportRisk, (o) => repository.observe(url, o)),
       dom = new LotteryDom(page, signal, perform)
+    const verificationRequestedAt = Date.now()
     let keep = false,
       navigated = false
     try {
@@ -145,7 +147,7 @@ export class DiscoveryService {
         room = { ...room, name: title }
         repository.updateRoom(url, { name: title })
       }
-      this.onLog(`验证 ${room.name || url}`)
+      this.onLog(`验证 ${roomDisplayName(room.name, url)}`)
       const started = Date.now(),
         dwell = Math.max(options.minDwellMs || 0, (options.reserved ? RETURN_VERIFICATION_MAX_SECONDS : VERIFICATION_MAX_SECONDS) * 1000)
       let opened = false,
@@ -185,9 +187,14 @@ export class DiscoveryService {
       if (!opportunity || !opportunity.drawAt) {
         const reason = '本次观察未获得可靠福袋倒计时，已进入复验冷却'
         repository.decision({ url, action: 'skip', reason, score: null, probability: null })
-        this.onLog(`跳过 ${room.name || url}：${reason}`)
+        this.onLog(`跳过 ${roomDisplayName(room.name, url)}：${reason}`)
         return { room: null, riskDetected: false, riskReason: reason }
       }
+      // Measure actual navigation dispatch through successful identity/task verification;
+      // time spent waiting for the global navigation gate is not loading time.
+      const navigationAt = repository.account().navigations.filter(n => n.url === url && n.at >= verificationRequestedAt).at(-1)?.at
+      if (navigationAt !== undefined && opportunity.tasksKnown && observer.panelLotteryId === opportunity.lotteryId && await dom.panelText())
+        repository.recordVerificationTiming(url, (Date.now() - navigationAt) / 1000)
       const verified: VerifiedFudaiRoom = {
         ...room,
         url,
@@ -214,7 +221,7 @@ export class DiscoveryService {
         if (navigated) repository.visit(url, false)
         const reason = `验证异常：${error instanceof Error ? error.message : String(error)}`
         repository.decision({ url, action: 'skip', reason, score: null, probability: null })
-        this.onLog(`跳过 ${room.name || url}：${reason}`)
+        this.onLog(`跳过 ${roomDisplayName(room.name, url)}：${reason}`)
       }
       throw error
     } finally {

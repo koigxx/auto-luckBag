@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import type { Insights } from '../../../shared/insights'
-import type { Payment, RoomProfile } from '../../../shared/policy'
+import type { Payment, Policy } from '../../../shared/policy'
 import ReviewSummary from './ReviewSummary.vue'
+import RoomLibraryView from './RoomLibraryView.vue'
+import OutcomeBar from './OutcomeBar.vue'
+import { inRun, recordTotals, roomDisplayName } from '../../../shared/record-presentation'
 import UiIcon from './UiIcon.vue'
 import UiDialog from './UiDialog.vue'
 const props = defineProps<{
@@ -10,6 +13,7 @@ const props = defineProps<{
   data: Insights | null
   loggedIn: boolean
   running: boolean
+  membership: Policy['membership']
   language: string
   busy: Record<string, boolean>
   onAction: (
@@ -21,21 +25,33 @@ const props = defineProps<{
 const api = window.api
 const emit = defineEmits<{ login: []; add: [] }>()
 const tr = (zh: string, en: string) => (props.language === 'en-US' ? en : zh)
-const filter = ref('')
-const roomFilter = ref('all')
+const runFilter = ref('')
 const tab = ref('rounds')
 const page = ref(1)
 const search=ref(''), dateFrom=ref(''),dateTo=ref(''),resultFilter=ref(''),cycleFilter=ref('')
 function matches(r:any):boolean {
   const at=r.createdAt??r.at,day=at?new Date(at).toLocaleDateString('en-CA'):''
-  return `${name(r.roomUrl||r.url||'')} ${r.reason||''}`.toLowerCase().includes(search.value.toLowerCase()) &&
+  return `${name(r.roomUrl||r.url||'')} ${r.roomUrl||r.url||''} ${r.reason||''} ${r.prizeName||''}`.toLowerCase().includes(search.value.toLowerCase()) &&
     (!dateFrom.value||day>=dateFrom.value)&&(!dateTo.value||day<=dateTo.value)&&
     (!resultFilter.value||(r.result||r.state||r.action)===resultFilter.value)&&
     (!cycleFilter.value||(r.budgetCycle??0)===Number(cycleFilter.value))
 }
-const filteredRounds=computed(()=>props.data?.rounds.filter(matches)||[])
-const filteredPayments=computed(()=>props.data?.payments.filter(matches)||[])
+const scopedRounds = computed(() => props.data?.rounds.filter(r => inRun(r,runFilter.value)) || [])
+const scopedPayments = computed(() => props.data?.payments.filter(r => inRun(r,runFilter.value)) || [])
+const totals = computed(() => recordTotals(scopedRounds.value, scopedPayments.value))
+const selectedRun = computed(() => props.data?.reports?.find(r => r.id === runFilter.value))
+const filteredRounds=computed(()=>scopedRounds.value.filter(matches))
+const filteredPayments=computed(()=>scopedPayments.value.filter(matches))
 const filteredDecisions=computed(()=>props.data?.decisions.filter(matches)||[])
+const tabItems=computed(()=>[
+  {id:'rounds',label:tr('参与记录','Entries'),hint:tr('参与是否成功，开奖结果如何','Participation and results'),count:scopedRounds.value.length},
+  {id:'payments',label:tr('支出账本','Payments'),hint:tr('扣款、预留与待核对','Charges, holds and review'),count:scopedPayments.value.length},
+  {id:'decisions',label:tr('选择依据','Decisions'),hint:tr('为什么参与、预约或跳过','Why joined, queued or skipped'),count:props.data?.decisions.length||0}
+])
+const searchHint=computed(()=>tab.value==='rounds'?tr('搜索房间或奖品','Search room or reward'):tab.value==='payments'?tr('搜索房间','Search room'):tr('搜索房间或原因','Search room or reason'))
+const paymentLabel=(state:string)=>({confirmed:tr('已确认扣款','Charge confirmed'),reserved:tr('仅预留，未付款','Reserved, not paid'),submitted:tr('已发起，待反馈','Sent, awaiting response'),unresolved:tr('支付待核对','Charge needs review'),failed:tr('未扣款','Not charged')}[state]||state)
+const unconfirmedOutcomes=computed(()=>scopedRounds.value.filter(r=>r.confirmedAt==null&&['unknown','pending'].includes(r.result)).length)
+
 const confirmation = ref<{
   kind: 'payment' | 'reset'
   payment?: Payment
@@ -52,26 +68,12 @@ const time = (value: number | null | undefined) =>
       })
     : '—'
 const name = (url: string) =>
-  props.data?.rooms.find((room) => room.url === url)?.name || url || tr('系统', 'System')
-const rooms = computed(() =>
-  (props.data?.rooms || [])
-    .filter(
-      (room) =>
-        `${room.name} ${room.url}`.toLowerCase().includes(filter.value.toLowerCase()) &&
-        (roomFilter.value === 'all' ||
-          (roomFilter.value === 'favorite'
-            ? room.favorite
-            : roomFilter.value === 'blocked'
-              ? room.blocked
-              : room.allowPaid))
-    )
-    .sort((a, b) => Number(b.favorite) - Number(a.favorite) || b.lastSeenAt - a.lastSeenAt)
-)
+  roomDisplayName(props.data?.rooms.find((room) => room.url === url)?.name, url, props.language==='en-US')
 const unresolved = computed(
   () => props.data?.payments.filter((payment) => payment.state === 'unresolved') || []
 )
 const risks = computed(() => props.data?.risks.filter((risk) => risk.resolvedAt === null) || [])
-watch(tab,()=>{resultFilter.value='';cycleFilter.value=''})
+watch(tab,()=>{resultFilter.value='';cycleFilter.value='';if(tab.value==='decisions')runFilter.value=''})
 const rows = computed(
   () =>
     (tab.value === 'rounds'
@@ -80,7 +82,7 @@ const rows = computed(
         ? filteredPayments.value
         : filteredDecisions.value) || []
 )
-const total = computed(() => (props.view === 'library' ? rooms.value.length : rows.value.length))
+const total = computed(() => rows.value.length)
 const pages = computed(() => Math.max(1, Math.ceil(total.value / 15)))
 const start = computed(() => (page.value - 1) * 15)
 const dialogTitle = computed(() =>
@@ -88,7 +90,7 @@ const dialogTitle = computed(() =>
     ? tr('重置展示统计', 'Reset display totals')
     : tr('核对这笔支付', 'Reconcile this payment')
 )
-watch([() => props.view, filter, roomFilter, tab,search,dateFrom,dateTo,resultFilter,cycleFilter], () => {
+watch([() => props.view, runFilter, tab,search,dateFrom,dateTo,resultFilter,cycleFilter], () => {
   page.value = 1
 })
 watch(pages, (count) => {
@@ -137,12 +139,6 @@ async function confirm() {
     dialogBusy.value = false
   }
 }
-async function changeRoom(room: RoomProfile, key: 'favorite' | 'blocked' | 'allowPaid', event: Event) {
-  const input = event.target as HTMLInputElement
-  const requested = input.checked
-  input.checked = room[key]
-  await props.onAction(`profile:${room.url}`, () => api.insights.room(room.url, { [key]: requested }))
-}
 </script>
 
 <template>
@@ -164,9 +160,19 @@ async function changeRoom(room: RoomProfile, key: 'favorite' | 'blocked' | 'allo
   <section v-else-if="!data" class="surface empty-state page-empty">
     <h2>{{ tr('正在读取记录…', 'Loading records…') }}</h2>
   </section>
+  <RoomLibraryView v-else-if="view==='library'" :data="data" :running="running" :language="language" :membership="membership" :busy="busy" :on-action="onAction" @add="emit('add')" />
   <div v-else class="records-view">
-    <template v-if="view === 'records'">
-      <ReviewSummary :data="data" :busy="busy" :on-action="onAction" />
+    <section class="surface record-overview">
+      <div class="record-scope-heading">
+        <div><h2>{{ tr('运行回顾','Run review') }}</h2><p>{{ selectedRun ? (selectedRun.endedAt===null?tr('运行中','Running'):selectedRun.reason) : runFilter==='unassigned'?tr('未归属的历史记录，不按时间推测运行。','Unassigned history; no inferred run ownership.'):tr('全部历史记录，包含旧预算轮次。','All historical records, including earlier budget cycles.') }}</p></div>
+        <label v-if="tab!=='decisions'" class="run-scope-label">{{ tr('查看范围','Scope') }}<select v-model="runFilter" :aria-label="tr('运行范围','Run scope')"><option value="">{{ tr('全部运行','All runs') }}</option><option v-for="r in data.reports||[]" :key="r.id" :value="r.id">{{ time(r.startedAt) }} · {{ r.endedAt===null?tr('运行中','Running'):r.reason }}</option><option value="unassigned">{{ tr('未归属运行的历史记录','Unassigned history') }}</option></select></label>
+      </div>
+      <div class="record-headline"><div><span>{{tr('确认参与','Confirmed entries')}}</span><strong>{{totals.confirmed}}</strong></div><div><span>{{tr('中奖','Won')}}</span><strong>{{totals.won}}</strong></div><div><span>{{tr('记录支出','Recorded spending')}}</span><strong>{{totals.spent}} <small>{{tr('钻','diamonds')}}</small></strong></div><div><span>{{tr('待定占额','Reserved / pending')}}</span><strong>{{totals.reserved}} <small>{{tr('钻','diamonds')}}</small></strong></div></div>
+      <OutcomeBar :won="totals.won" :lost="totals.lost" :unknown="totals.unknown" :pending="totals.pending" :language="language" />
+      <p v-if="unconfirmedOutcomes" class="microcopy">{{tr(`分布中包含 ${unconfirmedOutcomes} 条尚未确认参与的记录；未知结果不代表未中奖。`, `Distribution includes ${unconfirmedOutcomes} records without confirmed participation. Unknown is not a loss.`)}}</p>
+      <p v-if="selectedRun" class="microcopy">{{ tr('活跃','Active') }} {{ (selectedRun.activeMs/60000).toFixed(1) }} {{tr('分钟','minutes')}} · {{tr('结束','Ended')}} {{selectedRun.endedAt===null?'—':time(selectedRun.endedAt)}} · {{tr('预算轮次','Budget cycle')}} {{selectedRun.budgetCycle+1}}</p>
+    </section>
+    <ReviewSummary part="claims" :data="data" :busy="busy" :on-action="onAction" :language="language" />
       <section v-if="unresolved.length || risks.length" class="review-panel" aria-labelledby="review-title">
         <div class="section-heading">
           <h2 id="review-title"><UiIcon name="alert" />{{ tr('需要处理', 'Needs attention') }}</h2>
@@ -232,66 +238,12 @@ async function changeRoom(room: RoomProfile, key: 'favorite' | 'blocked' | 'allo
           </button>
         </div>
       </section>
-      <section class="metrics-strip record-metrics">
-        <div>
-          <span>{{ tr('已用 / 预留（钻）', 'Spent / reserved (diamonds)') }}</span
-          ><strong>{{ data.budget.spent }}<i> / </i>{{ data.budget.reserved }}</strong>
-        </div>
-        <div>
-          <span>{{ tr('免费复用参与占比', 'Entries reusing eligibility') }}</span
-          ><strong>{{ (data.metrics.reuse * 100).toFixed(1) }}<small>%</small></strong>
-        </div>
-        <div>
-          <span>{{ tr('每轮新增支出（钻）', 'New cost per entry') }}</span
-          ><strong>{{ data.metrics.costPerRound.toFixed(2) }}</strong>
-        </div>
-        <div>
-          <span>{{ tr('今日活跃（分钟）', 'Active today (minutes)') }}</span
-          ><strong
-            >{{ data.metrics.activeMinutes.toFixed(1)
-            }}<i> / {{ data.session.policy.dailyMinutes }}</i></strong
-          >
-        </div>
-      </section>
-    </template>
     <section class="surface data-surface">
-      <div class="data-toolbar" v-if="view === 'library'">
-        <label class="search-input"
-          ><UiIcon name="search" :size="18" /><input
-            v-model="filter"
-            type="search"
-            :aria-label="tr('搜索房间', 'Search rooms')"
-            :placeholder="tr('搜索主播或直播间地址', 'Search host or room URL')" /></label
-        ><select v-model="roomFilter" :aria-label="tr('房间筛选', 'Filter rooms')">
-          <option value="all">{{ tr('所有房间', 'All rooms') }}</option>
-          <option value="favorite">{{ tr('已收藏', 'Favorites') }}</option>
-          <option value="permitted">{{ tr('允许付费', 'Payment permitted') }}</option>
-          <option value="blocked">{{ tr('已屏蔽', 'Blocked') }}</option></select
-        ><button
-          class="button"
-          :disabled="running || busy.addRoom || !!unresolved.length || !!risks.length"
-          @click="emit('add')"
-        >
-          <UiIcon name="plus" :size="17" />{{ tr('手动参与', 'Join a room') }}
-        </button>
-      </div>
-      <div class="data-toolbar" v-else>
-        <div class="segment-control" :aria-label="tr('记录类型', 'Record type')">
-          <button
-            v-for="item in [
-              { id: 'rounds', zh: '参与记录', en: 'Entries' },
-              { id: 'payments', zh: '支出账本', en: 'Payments' },
-              { id: 'decisions', zh: '选择依据', en: 'Decisions' }
-            ]"
-            :key="item.id"
-            :class="{ selected: tab === item.id }"
-            :aria-pressed="tab === item.id"
-            @click="tab = item.id"
-          >
-            {{ tr(item.zh, item.en) }}
-          </button>
+      <div class="data-toolbar">
+        <div class="record-navigation" :aria-label="tr('记录类型','Record type')">
+          <button v-for="item in tabItems" :key="item.id" :class="{selected:tab===item.id}" :aria-label="item.label" :aria-pressed="tab===item.id" @click="tab=item.id"><span class="record-nav-title">{{item.label}}<b>{{item.count}}</b></span><small>{{item.hint}}</small></button>
         </div>
-        <div class="button-row">
+        <details class="record-actions"><summary>{{ tr('更多操作','More actions') }}</summary><div class="button-row">
           <button
             class="button small"
             :disabled="busy.export"
@@ -305,209 +257,52 @@ async function changeRoom(room: RoomProfile, key: 'favorite' | 'blocked' | 'allo
           >
             {{ tr('重置展示统计', 'Reset display totals') }}
           </button>
-        </div>
+        </div></details>
       </div>
-      <div v-if="view==='records'" class="record-filters">
-        <input v-model="search" type="search" placeholder="搜索房间或原因" aria-label="搜索运行记录" />
-        <input v-model="dateFrom" type="date" aria-label="记录开始日期" /><input v-model="dateTo" type="date" aria-label="记录结束日期" />
-        <select v-model="resultFilter" aria-label="记录状态"><option value="">全部状态</option><option v-for="value in (tab==='rounds'?['won','lost','unknown','pending','cancelled']:tab==='payments'?['confirmed','failed','unresolved','submitted','reserved']:['skip','candidate','takeover','budget-reset','reconcile'])" :key="value" :value="value">{{label(value)}}</option></select>
-        <select v-model="cycleFilter" aria-label="预算轮次筛选" v-if="tab!=='decisions'"><option value="">全部预算轮次</option><option v-for="c in data.cycles||[]" :key="c.cycle" :value="String(c.cycle)">预算第 {{c.cycle+1}} 轮</option></select>
-        <button class="button small" @click="search='';dateFrom='';dateTo='';resultFilter='';cycleFilter=''">清除筛选</button>
+      <div class="record-filters">
+        <input v-model="search" type="search" :placeholder="searchHint" :aria-label="tr('搜索运行记录','Search records')" />
+        <select v-model="resultFilter" :aria-label="tr('记录状态','Record status')"><option value="">{{tr('全部状态','All statuses')}}</option><option v-for="value in (tab==='rounds'?['won','lost','unknown','pending','cancelled']:tab==='payments'?['confirmed','failed','unresolved','submitted','reserved']:['skip','candidate','takeover','budget-reset','reconcile'])" :key="value" :value="value">{{tab==='payments'?paymentLabel(value):label(value)}}</option></select>
+        <details class="advanced-filters"><summary>{{tr('更多筛选','More filters')}}<span v-if="dateFrom||dateTo||cycleFilter"> · {{tr('已启用','Active')}}</span></summary><div>
+          <label>{{tr('从','From')}}<input v-model="dateFrom" type="date" :aria-label="tr('记录开始日期','Start date')" /></label><label>{{tr('到','To')}}<input v-model="dateTo" type="date" :aria-label="tr('记录结束日期','End date')" /></label>
+          <select v-model="cycleFilter" :aria-label="tr('预算轮次筛选','Budget cycle filter')" v-if="tab!=='decisions'"><option value="">{{tr('全部预算轮次','All budget cycles')}}</option><option v-for="c in data.cycles||[]" :key="c.cycle" :value="String(c.cycle)">{{tr('预算轮次','Budget cycle')}} {{c.cycle+1}}</option></select>
+        </div></details>
+        <button v-if="search||dateFrom||dateTo||resultFilter||cycleFilter" class="button text-button small" @click="search='';dateFrom='';dateTo='';resultFilter='';cycleFilter=''">{{tr('清除筛选','Clear filters')}}</button>
       </div>
-      <p v-if="view === 'library'" class="table-note">
-        {{
-          running
-            ? tr(
-                '运行中可查看，停止计划后可修改房间设置。',
-                'Read-only during a run. Stop the plan to edit rooms.'
-              )
-            : tr(
-                '收藏影响复访优先级；允许付费仍受策略和预算限制。当前资格每轮重新验证。',
-                'Favorites affect revisit order. Payment permission remains subject to policy and budget. Eligibility is rechecked each round.'
-              )
-        }}
-      </p>
-      <div v-if="!total" class="empty-state page-empty">
-        <span class="empty-icon"><UiIcon :name="view === 'library' ? 'rooms' : 'records'" :size="28" /></span>
-        <h3>
-          {{
-            view === 'library'
-              ? filter || roomFilter !== 'all'
-                ? tr('没有匹配的房间', 'No matching rooms')
-                : tr('房间库还是空的', 'Your room library is empty')
-              : tr('这里还没有记录', 'No records yet')
-          }}
-        </h3>
-        <p>
-          {{
-            view === 'library'
-              ? tr(
-                  '开始自动运行或手动验证后，会在这里保留房间档案。',
-                  'Verified and discovered rooms will appear here after a run.'
-                )
-              : tr(
-                  '参与、支付和选择过程会分别保留可核对的记录。',
-                  'Entries, payments and decisions are recorded separately.'
-                )
-          }}
-        </p>
-      </div>
-      <div v-else class="table-scroll" tabindex="0" :aria-label="tr('记录表格', 'Records table')">
-        <table v-if="view === 'library'">
-          <thead>
-            <tr>
-              <th>{{ tr('直播间 / 来源', 'Room / source') }}</th>
-              <th>{{ tr('当前资格', 'Eligibility') }}</th>
-              <th>{{ tr('发现 / 验证', 'Found / checked') }}</th>
-              <th>{{ tr('下次可复访', 'Next revisit') }}</th>
-              <th>{{ tr('房间设置', 'Room options') }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="room in rooms.slice(start, start + 15)" :key="room.url">
-              <td>
-                <strong class="cell-title" :title="room.url">{{ room.name }}</strong
-                ><small>{{ label(room.source) }}</small>
-              </td>
-              <td>
-                <span class="status-pill" :class="room.membership === 'satisfied' ? 'success' : 'neutral'">{{
-                  label(room.membership)
-                }}</span>
-              </td>
-              <td>{{ room.visits.filter((v) => v.found).length }} / {{ room.visits.length }}</td>
-              <td>{{ time(room.nextEligibleCheckAt) }}</td>
-              <td>
-                <div class="room-options">
-                  <label
-                    v-for="option in [
-                      { key: 'favorite', zh: '收藏', en: 'Favorite' },
-                      { key: 'blocked', zh: '屏蔽', en: 'Block' },
-                      { key: 'allowPaid', zh: '付费许可', en: 'Allow payment' }
-                    ]"
-                    :key="option.key"
-                    ><input
-                      type="checkbox"
-                      :checked="room[option.key as 'favorite' | 'blocked' | 'allowPaid']"
-                      :disabled="running || busy[`profile:${room.url}`]"
-                      :aria-label="`${room.name} ${tr(option.zh, option.en)}`"
-                      @change="changeRoom(room, option.key as 'favorite' | 'blocked' | 'allowPaid', $event)"
-                    />{{ tr(option.zh, option.en) }}</label
-                  >
-                </div>
-              </td>
-            </tr>
-          </tbody>
+      <p v-if="tab==='decisions'" class="table-note">{{tr('选择依据未绑定单次运行，按全部历史展示；可按日期和房间筛选。','Decisions have no run ownership. Showing all history; filter by date or room.')}}</p>
+      <p v-else class="record-scope-note">{{tr('明细遵循所选运行范围；上方摘要不受明细筛选影响。','Details follow the selected run scope. Detail filters do not change the summary.')}}</p>
+      <div v-if="!total" class="empty-state page-empty"><UiIcon name="records" :size="28" /><h3>{{tr('没有匹配的记录','No matching records')}}</h3><p>{{tr('切换运行范围或清除筛选，查看其他记录。','Change run scope or clear filters to see other records.')}}</p></div>
+      <ol v-else-if="tab==='decisions'" class="decision-feed" :aria-label="tr('选择依据时间线','Decision timeline')">
+        <li v-for="(decision,index) in filteredDecisions.slice(start,start+15)" :key="`${decision.at}:${index}`" class="decision-event">
+          <div class="decision-event-time"><span class="decision-dot" :class="{skipped:decision.action==='skip'}" /><time>{{time(decision.at)}}</time></div>
+          <div class="decision-event-body"><div class="decision-event-heading"><span class="status-pill" :class="decision.action==='skip'?'neutral':'schedule'">{{label(decision.action)}}</span><strong>{{name(decision.url)}}</strong></div><p class="decision-reason">{{decision.reason || tr('未记录具体原因','No reason recorded')}}</p>
+            <details class="record-evidence"><summary>{{tr('查看判断详情','Decision details')}}</summary>
+              <dl v-if="decision.snapshot"><div><dt>{{tr('预计新增费用','Expected new cost')}}</dt><dd>{{decision.snapshot.opportunity.cost??'—'}} {{tr('钻','diamonds')}}</dd></div><div><dt>{{tr('准备时间','Preparation')}}</dt><dd>{{decision.snapshot.leadSeconds}}s</dd></div><div><dt>{{tr('耗时样本数','Timing samples')}}</dt><dd>{{decision.snapshot.sampleCount}}</dd></div><div><dt>{{tr('证据来源','Evidence source')}}</dt><dd>{{decision.snapshot.opportunity.source}}</dd></div></dl>
+              <p>{{tr('估计中奖机会','Estimated chance')}} {{decision.probability==null?tr('无法估计','Not available'):`≈ ${(decision.probability*100).toFixed(2)}%`}}</p><p class="microcopy">{{tr('仅在名额与参与人数可用、同资格等概率的假设下估计，不代表实际中奖保证。','Estimate assumes equal chances and available prize / participant counts; it is not a guarantee.')}}</p><p class="record-address">{{decision.url||tr('系统记录','System record')}}</p>
+            </details>
+          </div>
+        </li>
+      </ol>
+      <div v-else class="table-scroll" tabindex="0" :aria-label="tr('记录表格','Records table')">
+        <table class="record-table entry-table" role="table" v-if="tab==='rounds'">
+          <thead><tr><th>{{tr('直播间与开奖时间','Room and draw')}}</th><th>{{tr('参与与结果','Entry and result')}}</th><th>{{tr('中奖奖励','Won reward')}}</th></tr></thead>
+          <tbody><tr v-for="round in filteredRounds.slice(start,start+15)" :key="round.key">
+            <td :data-label="tr('直播间与开奖时间','Room and draw')"><strong class="cell-title">{{name(round.roomUrl)}}</strong><small>{{tr('开奖','Draw')}} {{time(round.drawAt)}}</small>
+              <details class="record-evidence"><summary>{{tr('参与详情','Entry details')}}</summary><dl><div><dt>{{tr('提交时间','Submitted')}}</dt><dd>{{time(round.submittedAt)}}</dd></div><div><dt>{{tr('确认时间','Confirmed')}}</dt><dd>{{time(round.confirmedAt)}}</dd></div><div><dt>{{tr('福袋编号','Bag ID')}}</dt><dd>{{round.lotteryId}}</dd></div></dl><p class="record-address">{{round.roomUrl}}</p></details>
+            </td>
+            <td :data-label="tr('参与与结果','Entry and result')"><span class="status-pill" :class="round.result==='won'?'success':round.result==='unknown'?'warning':'neutral'">{{label(round.result)}}</span><small class="entry-confirmation" :class="{confirmed:round.confirmedAt!=null}">{{round.confirmedAt!=null?tr('已确认参与','Participation confirmed'):round.submittedAt!=null?tr('已提交，参与未确认','Submitted; participation unconfirmed'):tr('未确认参与','Participation unconfirmed')}}</small></td>
+            <td :data-label="tr('中奖奖励','Won reward')">
+              <template v-if="round.result==='won' && round.confirmedAt!=null"><strong class="reward-title">{{round.prizeName || (round.prizeType==='diamond'?tr('钻石奖励','Diamond reward'):tr('已中奖，奖品待补充','Won; reward details pending'))}}</strong><span class="reward-amount" v-if="round.prizeType==='diamond' && round.diamondAmount!=null">{{round.diamondAmount}} <small>{{tr('钻','diamonds')}}</small></span><small v-else-if="round.prizeType==='diamond'">{{tr('数量待确认','Amount pending')}}</small><small v-else-if="round.prizeQuantity!=null">× {{round.prizeQuantity}}{{round.prizeUnit||''}}</small><small v-if="round.prizeType!=='diamond'">{{round.claimed?tr('已标记处理','Marked handled'):tr('领取信息见上方待办','See claim checklist above')}}</small></template>
+              <span v-else class="empty-reward">{{round.result==='lost'?tr('无中奖奖励','No reward'):tr('暂无已确认奖励','No confirmed reward')}}</span>
+            </td>
+          </tr></tbody>
         </table>
-        <table v-else-if="tab === 'rounds'">
-          <thead>
-            <tr>
-              <th>{{ tr('直播间 / 开奖时间', 'Room / draw time') }}</th>
-              <th>{{ tr('提交与确认', 'Submission / confirmation') }}</th>
-              <th>{{ tr('开奖结果', 'Draw result') }}</th>
-              <th>{{ tr('奖励', 'Reward') }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="round in filteredRounds.slice(start, start + 15)" :key="round.key">
-              <td>
-                <strong class="cell-title">{{ name(round.roomUrl) }}</strong
-                ><small>{{ time(round.drawAt) }}</small>
-              </td>
-              <td>
-                <span>{{ tr('提交', 'Submitted') }} {{ time(round.submittedAt) }}</span
-                ><small>{{ tr('确认', 'Confirmed') }} {{ time(round.confirmedAt) }}</small>
-              </td>
-              <td>
-                <span
-                  class="status-pill"
-                  :class="
-                    round.result === 'won' ? 'success' : round.result === 'unknown' ? 'warning' : 'neutral'
-                  "
-                  >{{ label(round.result) }}</span
-                >
-              </td>
-              <td>
-                {{ label(round.prizeType) }}
-                <strong v-if="round.prizeType === 'diamond' && round.diamondAmount != null">{{ round.diamondAmount }} {{ tr('钻', 'diamonds') }}</strong>
-                <small v-else-if="round.result === 'won' && round.prizeType === 'diamond'">{{ tr('数量待确认', 'Amount pending') }}</small>
-                <small v-if="round.prizeName">{{ round.prizeName }}</small>
-                <small v-if="round.prizeQuantity != null">× {{ round.prizeQuantity }}{{ round.prizeUnit || '' }}</small>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-        <table v-else-if="tab === 'payments'">
-          <thead>
-            <tr>
-              <th>{{ tr('直播间 / 时间', 'Room / time') }}</th>
-              <th>{{ tr('金额', 'Amount') }}</th>
-              <th>{{ tr('用途', 'Purpose') }}</th>
-              <th>{{ tr('支付状态', 'Payment status') }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="payment in filteredPayments.slice(start, start + 15)" :key="payment.id">
-              <td>
-                <strong class="cell-title">{{ name(payment.roomUrl) }}</strong
-                ><small>{{ time(payment.at) }}</small>
-              </td>
-              <td>{{ payment.cost }} {{ tr('钻', 'diamonds') }}</td>
-              <td>{{ payment.newClub ? tr('新开粉丝团', 'New membership') : tr('再次点亮', 'Relight') }}</td>
-              <td>
-                <span
-                  class="status-pill"
-                  :class="
-                    payment.state === 'confirmed'
-                      ? 'success'
-                      : payment.state === 'unresolved'
-                        ? 'warning'
-                        : 'neutral'
-                  "
-                  >{{ label(payment.state) }}</span
-                >
-              </td>
-            </tr>
-          </tbody>
-        </table>
-        <table v-else>
-          <thead>
-            <tr>
-              <th>{{ tr('直播间 / 时间', 'Room / time') }}</th>
-              <th>{{ tr('决策与理由', 'Decision / reason') }}</th>
-              <th>{{ tr('估计机会', 'Estimated chance') }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="(decision, index) in filteredDecisions.slice(start, start + 15)" :key="index">
-              <td>
-                <strong class="cell-title">{{ name(decision.url) }}</strong
-                ><small>{{ time(decision.at) }}</small>
-              </td>
-              <td>
-                <strong>{{ label(decision.action) }}</strong>
-                <p class="cell-reason">{{ decision.reason }}</p>
-                <details v-if="decision.snapshot" class="evidence">
-                  <summary>{{ tr('查看依据', 'Show evidence') }}</summary>
-                  <p>
-                    {{ tr('费用', 'Cost') }} {{ decision.snapshot.opportunity.cost ?? '—' }} ·
-                    {{ tr('提前', 'Lead') }} {{ decision.snapshot.leadSeconds }}s ·
-                    {{ tr('样本', 'Samples') }} {{ decision.snapshot.sampleCount }}
-                  </p>
-                  <p>
-                    {{ tr('证据来源', 'Source') }}: {{ decision.snapshot.opportunity.source }} ·
-                    {{ tr('评分', 'Score') }} {{ decision.score?.toFixed(3) ?? '—' }}
-                  </p>
-                </details>
-              </td>
-              <td>
-                {{
-                  decision.probability == null
-                    ? tr('未知', 'Unknown')
-                    : `≈ ${(decision.probability * 100).toFixed(2)}%`
-                }}
-              </td>
-            </tr>
-          </tbody>
+        <table v-else class="record-table payment-table" role="table">
+          <thead><tr><th>{{tr('直播间与用途','Room and purpose')}}</th><th>{{tr('支付金额','Payment amount')}}</th><th>{{tr('账本状态','Ledger status')}}</th></tr></thead>
+          <tbody><tr v-for="payment in filteredPayments.slice(start,start+15)" :key="payment.id">
+            <td :data-label="tr('直播间与用途','Room and purpose')"><strong class="cell-title">{{name(payment.roomUrl)}}</strong><small>{{payment.newClub?tr('新开粉丝团','New membership'):tr('再次点亮','Relight')}} · {{time(payment.at)}}</small><details class="record-evidence"><summary>{{tr('支付详情','Payment details')}}</summary><dl><div><dt>{{tr('记录创建时间','Recorded')}}</dt><dd>{{time(payment.at)}}</dd></div><div><dt>{{tr('确认扣款时间','Charge confirmed')}}</dt><dd>{{time(payment.confirmedAt)}}</dd></div><div><dt>{{tr('预算轮次','Budget cycle')}}</dt><dd>{{(payment.budgetCycle??0)+1}}</dd></div><div><dt>{{tr('本地支付编号','Local payment ID')}}</dt><dd>{{payment.id}}</dd></div></dl><p class="record-address">{{payment.roomUrl}}</p></details></td>
+            <td :data-label="tr('支付金额','Payment amount')"><strong class="ledger-amount" :class="{settled:payment.state==='confirmed'}">{{payment.cost}} <small>{{tr('钻','diamonds')}}</small></strong><small>{{payment.state==='confirmed'?tr('计入已用预算','Counts as spent'):payment.state==='failed'?tr('不占用预算','No budget held'):tr('仍占用预算','Budget remains held')}}</small></td>
+            <td :data-label="tr('账本状态','Ledger status')"><span class="status-pill" :class="payment.state==='confirmed'?'success':payment.state==='unresolved'?'warning':'neutral'">{{paymentLabel(payment.state)}}</span><small v-if="payment.state==='unresolved'">{{tr('请在上方异常区核对实际扣款','Verify the actual charge in the review section above')}}</small></td>
+          </tr></tbody>
         </table>
       </div>
       <footer class="table-footer">
@@ -522,7 +317,8 @@ async function changeRoom(room: RoomProfile, key: 'favorite' | 'blocked' | 'allo
         </div>
       </footer>
     </section>
-    <p v-if="view === 'records'" class="microcopy">
+    <ReviewSummary part="history" :data="data" :busy="busy" :on-action="onAction" :language="language" />
+    <p class="microcopy">
       {{
         tr(
           '概率估计假设同资格等概率。未知结果不等于未中奖；导出不包含登录态、账号标识或评论口令。',
@@ -530,7 +326,7 @@ async function changeRoom(room: RoomProfile, key: 'favorite' | 'blocked' | 'allo
         )
       }}
     </p>
-    <details v-if="view === 'records' && Object.keys(data.legacy).length" class="legacy-records">
+    <details v-if="Object.keys(data.legacy).length" class="legacy-records">
       <summary>{{ tr('旧版汇总，仅供参考', 'Legacy totals, for reference only') }}</summary>
       <pre>{{ data.legacy }}</pre>
     </details>

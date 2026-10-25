@@ -1,9 +1,11 @@
+import { roomDisplayName } from '../shared/record-presentation'
+import { scheduleExclusionReason, sessionDisplayReason } from '../shared/run-presentation'
 import type { DiscoveryService, DiscoveredRoom, VerifiedFudaiRoom } from './discovery-service'
 import type { RoomManager } from './room-manager'
 import type { StatsService } from './stats-service'
-import { evaluate, bestSchedule, rankHistory, Evaluation } from './strategy'
+import { evaluate, bestSchedule, rankHistory, Evaluation, returnPreparationSeconds } from './strategy'
 import { seededRandom } from './session-engine'
-import { Opportunity, emptySession, HISTORY_STARTUP_FRESHNESS_MS, VERIFICATION_MAX_SECONDS, RETURN_PREPARATION_SECONDS } from '../shared/policy'
+import { Opportunity, emptySession, HISTORY_STARTUP_FRESHNESS_MS, VERIFICATION_MAX_SECONDS, RETURN_PREPARATION_SECONDS, ROOM_HANDOFF_SECONDS } from '../shared/policy'
 import type { Policy } from '../shared/policy'
 import type { AppConfig } from '../shared/config'
 import type { ExecutionGate } from './execution-gate'
@@ -58,12 +60,16 @@ export class AutoRunner {
     private discovery: Pick<DiscoveryService, 'scan' | 'verifyRoom' | 'close'>,
     private rooms: Pick<
       RoomManager,
-      'setContinuationCheck' | 'getAllRooms' | 'tick' | 'addRoom' | 'addRoomFromPage' | 'closeAllRooms'
+      'setContinuationCheck' | 'setReservationTimeProvider' | 'getAllRooms' | 'tick' | 'addRoom' | 'addRoomFromPage' | 'closeAllRooms'
     >,
     private stats: Pick<StatsService, 'markStarted' | 'markStopped' | 'publish'>,
     private env: AutoRunnerEnvironment
   ) {
     rooms.setContinuationCheck((o, room) => this.continuationReason(o, room))
+    rooms.setReservationTimeProvider(() => {
+      const times = this.pool.filter(r => r.drawAt !== null && r.drawAt > this.env.now()).map(r => r.evaluation.startAt)
+      return times.length ? Math.min(...times) : null
+    })
   }
   setResumeCheck(fn: () => Promise<boolean>): void {
     this.resumeCheck = fn
@@ -97,7 +103,8 @@ export class AutoRunner {
         lotteryId:r.opportunity.lotteryId,
         cost:r.opportunity.cost,
         startAt:r.evaluation.startAt,
-        taskAt:(r.drawAt||0)-Math.max(this.env.store.get('enterBeforeSeconds'),r.evaluation.leadSeconds-RETURN_PREPARATION_SECONDS)*1000,
+        verifiedAt:r.verifiedAt,
+        taskAt:(r.drawAt||0)-Math.max(this.env.store.get('enterBeforeSeconds'),r.evaluation.leadSeconds-(r.evaluation.returnPreparationSeconds??RETURN_PREPARATION_SECONDS))*1000,
         url: r.url,
         name: r.name,
         score: Number(r.evaluation.score.toFixed(3)),
@@ -110,7 +117,7 @@ export class AutoRunner {
       })),
       riskPausedUntil: null,
       lastRiskReason: account?.risks.find((r) => r.resolvedAt === null)?.reason || '',
-      session: s,
+      session: { ...s, reason: sessionDisplayReason(s) },
       resumeRemainingSeconds:
         s.nextResumeAt === null ? null : Math.max(0, Math.ceil((s.nextResumeAt - this.env.now()) / 1000))
     }
@@ -287,7 +294,7 @@ export class AutoRunner {
       }
     }
     if (before !== this.env.repository.account().session.phase)
-      this.log(this.env.repository.account().session.reason)
+      this.log(sessionDisplayReason(this.env.repository.account().session))
     this.stats.publish()
     this.publish()
   }
@@ -295,7 +302,9 @@ export class AutoRunner {
     const a = this.env.repository.account(),
       p = this.env.policy(),
       records = Object.values(a.rounds).filter((r) => r.roomUrl === room.url)
-    const e = evaluate(room.opportunity, p, this.env.now(), a.rooms[room.url], records, open)
+    const returnSeconds = returnPreparationSeconds(a.rooms[room.url], this.env.now())
+    const e = evaluate(room.opportunity, p, this.env.now(), a.rooms[room.url], records, open, returnSeconds)
+    e.returnPreparationSeconds = returnSeconds
     if(this.env.repository.isSkipped(room.url,room.opportunity.lotteryId,p.timezone))return {...e,feasible:false,reason:'用户已跳过此候选或今日房间'}
     if (!e.feasible) return e
     const types = this.env.store.get('fudaiTypes'),
@@ -312,7 +321,7 @@ export class AutoRunner {
     // The lead covers loading, revalidation and tasks. Navigation spacing is
     // reserved separately by the scheduler, never added again to task time.
     if (!open) {
-      e.leadSeconds = Math.max(e.leadSeconds, this.env.store.get('enterBeforeSeconds') + RETURN_PREPARATION_SECONDS)
+      e.leadSeconds = Math.max(e.leadSeconds, this.env.store.get('enterBeforeSeconds') + returnSeconds)
       e.startAt = (o.drawAt || 0) - e.leadSeconds * 1000
     }
     return e
@@ -351,7 +360,7 @@ export class AutoRunner {
         score: null,
         probability: null
       })
-      this.log(`跳过 ${r.name}：候选已过开奖时间`)
+      this.log(`跳过 ${roomDisplayName(r.name, r.url)}：候选已过开奖时间`)
       return false
     })
     const due = this.pool.find((r) => r.evaluation.startAt <= this.env.now())
@@ -359,7 +368,7 @@ export class AutoRunner {
       if (!this.canNavigate(false)) return false
       this.pool = this.pool.filter((r) => r !== due)
       this.wait('')
-      this.log(`候选到时复验 ${due.name}，重新确认本轮任务与费用`)
+      this.log(`候选到时复验 ${roomDisplayName(due.name, due.url)}，重新确认本轮任务与费用`)
       return this.verifyAndSchedule(due, true)
     }
     if (this.env.now() < this.retryAt) return false
@@ -471,10 +480,10 @@ export class AutoRunner {
         e.reason = '验证页面未保留，无法直接参与'
       }
       const a = this.env.repository.account()
-      const recordDecision = (action: 'takeover' | 'candidate' | 'skip') => this.env.repository.decision({
+      const recordDecision = (action: 'takeover' | 'candidate' | 'skip', reason = e.reason) => this.env.repository.decision({
         url: room.url,
         action,
-        reason: e.reason,
+        reason,
         score: e.score,
         probability: e.probability,
         seed: a.session.seed,
@@ -489,7 +498,7 @@ export class AutoRunner {
       })
       if (!e.feasible) {
         recordDecision('skip')
-        this.log(`跳过 ${room.name}：${e.reason}`)
+        this.log(`跳过 ${roomDisplayName(room.name, room.url)}：${e.reason}`)
         return true
       }
       if (direct && result.page) {
@@ -502,14 +511,15 @@ export class AutoRunner {
         const chosen = bestSchedule(choices, this.env.store.get('candidatePoolLimit'),
           this.env.policy().navigationMaxSeconds)
         if (!chosen.includes(immediate)) {
-          this.log(`跳过 ${room.name}：与已预约候选冲突，保留可完成的参与组合`)
-          this.env.repository.decision({url:room.url, action:'skip', reason:'与已预约候选时间或导航间隔冲突', score:e.score, probability:e.probability})
+          const reason = scheduleExclusionReason(immediate, chosen, this.env.policy().navigationMaxSeconds, this.env.store.get('candidatePoolLimit'), this.env.policy().timezone)
+          this.log(`跳过 ${roomDisplayName(room.name, room.url)}：${reason}`)
+          this.env.repository.decision({url:room.url, action:'skip', reason, score:e.score, probability:e.probability})
           return true
         }
         this.pool = chosen.filter(r => r !== immediate)
         recordDecision('takeover')
         this.log(
-          `接管页面，准备参与 ${room.name}：剩余 ${Math.ceil((room.drawAt! - this.env.now()) / 1000)} 秒，继续校验弹窗身份与任务`
+          `接管页面，准备参与 ${roomDisplayName(room.name, room.url)}：剩余 ${Math.ceil((room.drawAt! - this.env.now()) / 1000)} 秒，继续校验弹窗身份与任务`
         )
         await this.rooms.addRoomFromPage(result.page, room.url, room.name, {
           opportunity: room.opportunity,
@@ -520,15 +530,16 @@ export class AutoRunner {
         return true
       }
       const candidates = [...this.pool, { ...room, evaluation: e }]
-      recordDecision('candidate')
       this.pool = bestSchedule(
         candidates,
         this.env.store.get('candidatePoolLimit'), this.env.policy().navigationMaxSeconds
       )
+      const retained = this.pool.some(r => r.url === room.url)
+      recordDecision(retained ? 'candidate' : 'skip', retained ? e.reason : scheduleExclusionReason({ ...room, evaluation:e }, this.pool, this.env.policy().navigationMaxSeconds, this.env.store.get('candidatePoolLimit'), this.env.policy().timezone))
       this.log(
-        this.pool.some((r) => r.url === room.url)
-          ? `候选等待 ${room.name}：开奖前约 ${e.leadSeconds} 秒开始返房（加载、复验及调度预留 ${RETURN_PREPARATION_SECONDS} 秒），任务准备目标至少 ${e.leadSeconds - RETURN_PREPARATION_SECONDS} 秒`
-          : `跳过 ${room.name}：与更优候选时间冲突或排序靠后`
+        retained
+          ? `候选等待 ${roomDisplayName(room.name, room.url)}：开奖前约 ${e.leadSeconds} 秒开始返房（加载、复验及调度预留 ${e.returnPreparationSeconds ?? RETURN_PREPARATION_SECONDS} 秒），任务准备目标至少 ${e.leadSeconds - (e.returnPreparationSeconds ?? RETURN_PREPARATION_SECONDS)} 秒`
+          : `跳过 ${roomDisplayName(room.name, room.url)}：${scheduleExclusionReason({ ...room, evaluation:e }, this.pool, this.env.policy().navigationMaxSeconds, this.env.store.get('candidatePoolLimit'), this.env.policy().timezone)}`
       )
       return true
     } finally {
@@ -542,8 +553,8 @@ export class AutoRunner {
     // Pool expiry is normally pruned by cycle(), which does not run while a
     // room is active. Expired reservations must not force that room to leave.
     const reservations = this.pool.filter(r => r.drawAt !== null && r.drawAt > this.env.now())
-    if (!o) return reservations.some(r => r.evaluation.startAt <= this.env.now())
-      ? '已有预约到时，结束等待新福袋并返房复验' : null
+    if (!o) return reservations.some(r => r.evaluation.startAt <= this.env.now() + ROOM_HANDOFF_SECONDS * 1000)
+      ? '已有预约到时或即将到时，预留切换时间并结束等待新福袋' : null
     const candidate: VerifiedFudaiRoom = {
       ...room, opportunity:o, drawAt:o.drawAt, verifiedAt:this.env.now(), hasFudai:true,
       reason:'同房新一轮', remainingSeconds:Math.ceil((o.drawAt! - this.env.now()) / 1000),
@@ -556,7 +567,7 @@ export class AutoRunner {
       this.pool = bestSchedule([...this.pool.filter(r=>r.url!==room.url), scheduled],
         this.env.store.get('candidatePoolLimit'), this.env.policy().navigationMaxSeconds)
       const kept = this.pool.includes(scheduled)
-      const reason = kept ? '下一轮已加入预约队列，离房继续验证其他候选' : '下一轮与更优预约组合冲突，结束驻留'
+      const reason = kept ? '下一轮已加入预约队列，离房继续验证其他候选' : `${scheduleExclusionReason(scheduled, this.pool, this.env.policy().navigationMaxSeconds, this.env.store.get('candidatePoolLimit'), this.env.policy().timezone)}，结束驻留`
       // The room service records the decision; RoomManager emits its final reason once.
       return reason
     }

@@ -468,15 +468,15 @@ async function save() {
                 }}
               </option>
               <option value="whitelist">
-                {{ tr('仅对已明确许可的主播付费', 'Payments only for explicitly permitted hosts') }}
+                {{ tr('仅历史已许可主播可付费', 'Payments only for historically permitted hosts') }}
               </option>
             </select></label
           >
           <p class="microcopy">
             {{
               tr(
-                '首次发现且时间、任务和支出限制满足即可付费参与，无需重复验证两次；仅许可策略仍需在房间库授权。',
-                'First-time rooms are eligible when time, tasks and spending limits permit. The permitted-hosts policy still requires room authorization.'
+                '优先复用会按资格、时间和预算自动判断付费，无需逐房配置；仅历史许可模式保留原有许可范围，不会自动扩大。',
+                'Reuse-first checks eligibility, time and budget automatically, with no per-room setup. Historical-permission mode preserves its existing scope without expanding it.'
               )
             }}
           </p>

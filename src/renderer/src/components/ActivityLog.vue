@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import type { LogEntry, RoomInfo } from '../types'
+import { roomDisplayName } from '../../../shared/record-presentation'
 import UiIcon from './UiIcon.vue'
 const props = defineProps<{ logs: LogEntry[]; rooms: RoomInfo[]; language: string }>()
 const emit = defineEmits<{ clear: [] }>()
@@ -9,14 +10,14 @@ const search = ref('')
 const autoScroll = ref(true)
 const container = ref<HTMLElement | null>(null)
 const filtered = computed(() =>
-  props.logs.filter((log) =>
+  [...props.logs].reverse().filter((log) =>
     `${log.message} ${source(log)}`.toLowerCase().includes(search.value.toLowerCase())
   )
 )
 function source(log: LogEntry) {
   const id = log.roomId
   return (
-    log.roomName ||
+    (log.roomName ? roomDisplayName(log.roomName, /^https?:/.test(log.roomName) ? log.roomName : props.rooms.find(room=>room.id===id)?.url || '', props.language==='en-US') : '') ||
     props.rooms.find((room) => room.id === id)?.name ||
     (
       {
@@ -31,12 +32,12 @@ function source(log: LogEntry) {
 watch(
   () => props.logs,
   async () => {
-    if (autoScroll.value) {
-      await nextTick()
-      if (container.value) container.value.scrollTop = container.value.scrollHeight
-    }
+    const el=container.value, top=el?.scrollTop??0, height=el?.scrollHeight??0
+    await nextTick()
+    if(el)el.scrollTop=autoScroll.value?0:top+Math.max(0,el.scrollHeight-height)
   }
 )
+watch(autoScroll, async following => { if(following){await nextTick();if(container.value)container.value.scrollTop=0} })
 </script>
 
 <template>
@@ -49,7 +50,7 @@ watch(
           :aria-label="tr('搜索日志', 'Search logs')"
           :placeholder="tr('搜索操作、房间或原因', 'Search actions, rooms or reasons')" /></label
       ><label class="checkbox-label"
-        ><input v-model="autoScroll" type="checkbox" />{{ tr('自动滚动', 'Auto-scroll') }}</label
+        ><input v-model="autoScroll" type="checkbox" />{{ tr('跟随最新', 'Follow latest') }}</label
       ><button class="button small" :disabled="!logs.length" @click="emit('clear')">
         {{ tr('清空显示', 'Clear display') }}
       </button>
@@ -57,8 +58,8 @@ watch(
     <p class="table-note">
       {{
         tr(
-          '保留本次打开应用后的最近 500 条日志。清空显示不会影响历史记录和预算。',
-          'Shows up to 500 events from this app session. Clearing the display does not change history or budgets.'
+          '最新日志在最上方，保留本次打开应用后的最近 500 条。清空显示不会影响历史记录和预算。',
+          'Newest events first; shows up to 500 events from this app session. Clearing the display does not change history or budgets.'
         )
       }}
     </p>
@@ -100,7 +101,7 @@ watch(
         )
       }}</span
       ><span>{{
-        autoScroll ? tr('新日志自动滚动', 'Following new events') : tr('自动滚动已暂停', 'Auto-scroll paused')
+        autoScroll ? tr('新日志自动回到顶部', 'Following newest events at the top') : tr('自动滚动已暂停', 'Auto-scroll paused')
       }}</span>
     </footer>
   </section>

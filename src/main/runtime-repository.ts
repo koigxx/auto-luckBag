@@ -77,11 +77,19 @@ export class RuntimeRepository {
     this.room(url)
     this.change(a => { Object.assign(a.rooms[url], patch) })
   }
+  recordVerificationTiming(url: string, seconds: number): void {
+    if (!Number.isFinite(seconds) || seconds < 3 || seconds > 120) return
+    this.change(a => {
+      const room = a.rooms[url]
+      if (room) room.verificationTimings = [...(room.verificationTimings || []), {at:this.now(),seconds}].slice(-5)
+    })
+  }
   visit(url: string, found: boolean, opportunity?: Opportunity): void {
     this.room(url)
     const now = this.now()
     this.change(a => {
       const r = a.rooms[url]; r.lastSeenAt = now; r.failures = found ? 0 : r.failures + 1
+      if (!found) r.verificationTimings = []
       r.visits = [...r.visits, { at: now, found }].slice(-200)
       r.nextEligibleCheckAt = now + (found ? 5 * 60_000 : Math.min(240, 30 * 2 ** Math.min(3, r.failures - 1)) * 60_000)
       if (opportunity) this.applyObservation(r, opportunity)

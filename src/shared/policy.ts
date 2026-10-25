@@ -37,6 +37,18 @@ export const DEFAULT_POLICY: Policy = {
   allowedStart: '00:00', allowedEnd: '00:00', timezone: 'Asia/Shanghai', autoResume: true
 }
 
+export const COMMENT_READONLY_REOPEN_SECONDS = 2
+export const ROOM_HANDOFF_SECONDS = 5
+export const RESULT_OBSERVATION_SECONDS = 25
+export interface RoomTimeline {
+  stage: 'prepare' | 'draw' | 'next'
+  startedAt: number
+  endsAt: number | null
+  remainingSeconds: number | null
+  taskAt: number | null
+  drawAt: number | null
+  nextUntil: number | null
+}
 export const SOURCE_TO_FIRST_ROOM_SECONDS = 20
 export const VERIFICATION_MAX_SECONDS = 28
 export const RETURN_VERIFICATION_MAX_SECONDS = 12
@@ -102,6 +114,7 @@ export interface RoomProfile {
   everPaid: boolean
   memberKnown?: boolean | null
   visits: { at: number; found: boolean }[]
+  verificationTimings?: { at: number; seconds: number }[]
   observations: { at: number; lotteryId: string; drawAt: number; participants: number | null }[]
   failures: number
 }

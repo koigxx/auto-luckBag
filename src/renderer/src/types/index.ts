@@ -2,6 +2,7 @@ import type { SessionRecord } from '../../../shared/policy'
 export type RoomStatus = 'loading' | 'monitoring' | 'grabbing' | 'error' | 'idle'
 
 export interface RoomInfo {
+  timeline?: import('../../../shared/policy').RoomTimeline
   phase?: string
   id: string
   url: string
@@ -84,6 +85,8 @@ export interface AutoRunState {
     cost?:number|null
     startAt?:number
     taskAt?:number
+    drawAt?:number|null
+    verifiedAt?:number
     url: string
     name: string
     score: number

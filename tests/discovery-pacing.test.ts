@@ -7,7 +7,9 @@ test('source discovery waits 20 seconds before first room page, never repeats fo
   let now=1000000, cancelOnWait=false, ready=false, matched=true
   const opportunity=()=>parseLottery(JSON.stringify({data:{lottery_info:{lottery_id:'fixture',count_down:90,conditions:[]}}}),now)!
   let controller=new AbortController()
-  const created:number[]=[], waits:number[]=[]
+  const created:number[]=[], waits:number[]=[], timings:number[]=[]
+  const navigations:{url:string;at:number}[]=[]
+  let gateWait=0, loadMs=0
   const profile={visits:[] as unknown[],name:'room'}
   const fakePage={on:()=>{},off:()=>{},close:async()=>{},title:async()=> 'room',
     locator:()=>({evaluateAll:async()=>[{url:'https://live.douyin.com/12345678',name:'room'}]})}
@@ -15,7 +17,7 @@ test('source discovery waits 20 seconds before first room page, never repeats fo
   Module._load=function(name:string,...args:any[]){
     if(name==='./runtime')return {
       execution:{get signal(){return controller.signal}},
-      repository:{room:()=>profile,visit:()=>{profile.visits.push({})},decision:()=>{},updateRoom:()=>{}},
+      repository:{account:()=>({navigations}),recordVerificationTiming:(_url:string,seconds:number)=>timings.push(seconds),room:()=>profile,visit:()=>{profile.visits.push({})},decision:()=>{},updateRoom:()=>{}},
       assertActive:(signal:AbortSignal)=>gate.checkSignal(signal),onHalt:()=>{},perform:()=>{},reportRisk:()=>{}
     }
     if(name==='./passive-observer')return {PassiveObserver:class {get latest(){return ready?opportunity():null}get panelLotteryId(){return matched?'fixture':null}accept(){}async checkPageRisk(){}close(){}}}
@@ -32,7 +34,7 @@ test('source discovery waits 20 seconds before first room page, never repeats fo
   const dateNow=Date.now
   Date.now=()=>now
   try{
-    const service=new Discovery({newManagedPage:async()=>{created.push(now);return fakePage},navigate:async()=>{}} as any)
+    const service=new Discovery({newManagedPage:async()=>{created.push(now);return fakePage},navigate:async(_page:unknown,url:string)=>{now+=gateWait;navigations.push({url,at:now});now+=loadMs}} as any)
     const scan=await service.scan()
     const discoveredAt=now
     await service.verifyRoom(scan.rooms[0])
@@ -45,10 +47,17 @@ test('source discovery waits 20 seconds before first room page, never repeats fo
     const readyAt=now
     await service.verifyRoom(scan.rooms[0],{reserved:true})
     assert.equal(now-readyAt,3000,'ready identity/tasks end verification without a mandatory 28-second dwell')
+    assert.equal(timings.at(-1),3)
+    gateWait=120000;loadMs=5000
+    await service.verifyRoom(scan.rooms[0],{reserved:true})
+    assert.equal(timings.at(-1),8,'return sample excludes waiting for navigation permission')
+    gateWait=0;loadMs=0
+    const sampleCount=timings.length
     matched=false
     const unknownAt=now
     await service.verifyRoom(scan.rooms[0],{reserved:true})
     assert.equal(now-unknownAt,12000,'unmatched panel cannot trigger the fast verification path')
+    assert.equal(timings.length,sampleCount,'unmatched identity cannot train faster returns')
     await service.scan()
     cancelOnWait=true
     const beforeCancel=created.length

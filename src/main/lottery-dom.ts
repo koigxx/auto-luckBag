@@ -67,6 +67,14 @@ export class LotteryDom {
     await this.page.addInitScript(install, name)
     await this.page.evaluate(install, name)
   }
+  async panelIsClosed(): Promise<boolean> {
+    // A visible but unreadable dialog is not evidence that it closed.
+    return this.page.evaluate(selector => ![...document.querySelectorAll(selector)].some(el => {
+      const r = el.getBoundingClientRect(), s = getComputedStyle(el)
+      return s.display !== 'none' && s.visibility !== 'hidden' && +s.opacity > 0.05 &&
+        r.width >= 120 && r.height >= 80 && r.width * r.height < innerWidth * innerHeight * 0.8
+    }), MODAL_SELECTOR)
+  }
   async panel(kind: 'any' | 'task' = 'any'): Promise<ElementHandle<HTMLElement> | null> {
     const handle = await this.page.evaluateHandle(({selector, known, result, kind}) => {
       if (kind === 'task' && [...document.querySelectorAll(result)].some(el => {

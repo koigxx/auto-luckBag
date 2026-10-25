@@ -1,4 +1,4 @@
-import { Opportunity, Policy, RoomProfile, RoundRecord, RETURN_PREPARATION_SECONDS } from '../shared/policy'
+import { Opportunity, Policy, RoomProfile, RoundRecord, RETURN_PREPARATION_SECONDS, RESULT_OBSERVATION_SECONDS, ROOM_HANDOFF_SECONDS } from '../shared/policy'
 
 export interface Evaluation {
   feasible: boolean
@@ -10,14 +10,23 @@ export interface Evaluation {
   leadSeconds: number
   startAt: number
   /** Actual navigation dispatch for an already-open page; otherwise startAt. */
+  returnPreparationSeconds?: number
   navigationAt?: number
   endAt: number
+}
+/** Slowest recent successful visit plus margin; unknown/stale rooms keep the full allowance. */
+export function returnPreparationSeconds(room: RoomProfile | undefined, now: number): number {
+  const samples = room?.failures ? [] : (room?.verificationTimings || []).filter(s =>
+    Number.isFinite(s.seconds) && s.seconds >= 3 && s.seconds <= 120 && s.at <= now && s.at >= now - 86400000)
+  if (!samples.length) return RETURN_PREPARATION_SECONDS
+  return Math.max(20, Math.ceil(Math.max(...samples.map(s => s.seconds)) + 8))
 }
 export function taskLead(
   o: Opportunity,
   p: Policy,
   records: RoundRecord[] = [],
-  alreadyOpen = false
+  alreadyOpen = false,
+  returnSeconds = RETURN_PREPARATION_SECONDS
 ): number {
   const samples = records
     .map((r) => r.taskSeconds)
@@ -32,7 +41,7 @@ export function taskLead(
         (o.requiresFollow ? 5 : 0) +
         (o.membership === 'needs-payment' ? 12 : 0) +
         (o.watchSeconds || 0)
-    ) + 5 + (alreadyOpen ? 0 : RETURN_PREPARATION_SECONDS)
+    ) + 5 + (alreadyOpen ? 0 : returnSeconds)
   )
 }
 export function projectedParticipants(o: Opportunity, r?: RoomProfile): number | null {
@@ -57,11 +66,12 @@ export function evaluate(
   now: number,
   room?: RoomProfile,
   records: RoundRecord[] = [],
-  alreadyOpen = false
+  alreadyOpen = false,
+  returnSeconds = RETURN_PREPARATION_SECONDS
 ): Evaluation {
-  const leadSeconds = taskLead(o, p, records, alreadyOpen),
+  const leadSeconds = taskLead(o, p, records, alreadyOpen, returnSeconds),
     startAt = (o.drawAt || 0) - leadSeconds * 1000,
-    endAt = (o.drawAt || 0) + 25000
+    endAt = (o.drawAt || 0) + (RESULT_OBSERVATION_SECONDS + ROOM_HANDOFF_SECONDS) * 1000
   const reject = (reason: string): Evaluation => ({
     feasible: false,
     reason,
@@ -92,7 +102,7 @@ export function evaluate(
   const attempts = records.filter((r) => r.submittedAt),
     confirmed = attempts.filter((r) => r.confirmedAt).length
   const q = attempts.length >= 10 ? (confirmed + 2) / (attempts.length + 4) : 0.75
-  const minutes = Math.max(1, (o.drawAt - now + 25000) / 60000)
+  const minutes = Math.max(1, (o.drawAt - now + (RESULT_OBSERVATION_SECONDS + ROOM_HANDOFF_SECONDS) * 1000) / 60000)
   let reward = probability,
     mode: Evaluation['mode'] = probability === null ? 'fallback' : 'estimate'
   if (p.objective === 'diamond') {

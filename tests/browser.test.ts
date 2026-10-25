@@ -482,13 +482,65 @@ test('closed comment modal reopens once for confirmation only and never executes
         ? '<div data-lottery-id="other">已参与，等待开奖</div>'
         : outcome+'<button onclick="window.comments++">一键评论</button><button onclick="window.paid++">加入粉丝团(1钻)</button>'},outcome)
       await h.service.tick();await h.service.tick();await h.service.tick()
-      h.advance(10000);await h.service.tick();await h.service.tick()
+      h.advance(1999);await h.service.tick()
+      assert.equal(await p.evaluate(()=>(window as any).opens),0,'wait for stable closure')
+      h.advance(1);await h.service.tick();await h.service.tick()
       assert.equal(h.repo.stats().participated,outcome==='已参与，等待开奖'?1:0)
       h.advance(11000);await h.service.tick();await h.service.tick()
       assert.deepEqual(await p.evaluate(()=>[(window as any).comments,(window as any).opens,(window as any).paid]),[1,1,0])
       if(outcome!=='已参与，等待开奖')assert.match(h.service.doneReason,/未确认本人参与/)
     }finally{await h.finish()}
   }
+})
+
+test('fast read-only confirmation does not reopen an unreadable visible panel, changed round or stopped run',async()=>{
+  for(const scenario of ['unreadable','changed','stopped']){
+    const p=await page(css+`<script>window.opens=0;window.comments=0</script><div id="ShortTouchLayout"><div class="ycjwPFJI" onclick="window.opens++">01:00</div></div><div class="lottery-dialog">福袋参与条件<button onclick="window.comments++;this.parentElement.remove()">一键评论</button></div>`)
+    const h=harness(p,{requiresComment:true,commentText:'测试'})
+    try{
+      await h.service.tick();await h.service.tick();await h.service.tick()
+      if(scenario==='unreadable')await p.evaluate(()=>{const d=document.createElement('div');d.className='lottery-dialog';d.textContent='加载中';document.body.appendChild(d)})
+      if(scenario==='changed')h.service.observer.accept({...h.o,lotteryId:'other'})
+      if(scenario==='stopped'){h.controller.abort();h.service.stopMonitoring()}
+      h.advance(2500);await h.service.tick()
+      assert.equal(await p.evaluate(()=>(window as any).opens),0,scenario)
+      assert.equal(await p.evaluate(()=>(window as any).comments),1,scenario)
+      assert.equal(h.repo.stats().participated,0,scenario)
+    }finally{await h.finish()}
+  }
+})
+
+test('stage timing distinguishes waiting, unbounded tasks, confirmed entry and bounded next-round observation',async()=>{
+  const p=await page(css+'<div class="lottery-dialog">福袋参与条件<button>一键评论</button></div>')
+  const h=harness(p,{requiresComment:true,commentText:'测试'})
+  h.env.getConfig=()=>({...defaults,enterBeforeSeconds:45})
+  try{
+    await h.service.tick()
+    let t=h.service.getTimeline()!
+    assert.equal(t.stage,'prepare');assert.equal(t.taskAt,h.o.drawAt!-45000);assert.equal(t.remainingSeconds,75)
+    h.advance(75000);await h.service.tick();t=h.service.getTimeline()!
+    assert.equal(t.stage,'prepare');assert.equal(t.endsAt,null,'task duration has no invented percentage')
+    await p.evaluate(()=>{document.querySelector('.lottery-dialog')!.innerHTML='福袋 已参与，等待开奖'})
+    await h.service.tick();assert.equal(h.service.getTimeline()!.stage,'draw')
+    h.advance(45000)
+    await p.evaluate(()=>{document.querySelector('.lottery-dialog')!.innerHTML='福袋 很遗憾，未中奖'})
+    await h.service.tick()
+    assert.equal(h.service.getTimeline()!.stage,'next','clear own loss does not wait another 25 seconds')
+    ;(h.service as any).callbacks.nextReservationAt=()=>h.now()+12000
+    assert.equal(h.service.getTimeline()!.remainingSeconds,7,'observation leaves five seconds for handoff')
+  }finally{await h.finish()}
+})
+
+test('unknown draw stays unknown when result observation yields to a reservation',async()=>{
+  const p=await page(css+'<div class="lottery-dialog">福袋 已参与，等待开奖</div>'),h=harness(p)
+  try{
+    await h.service.tick();await h.service.tick();h.advance(120000)
+    ;(h.service as any).callbacks.nextReservationAt=()=>h.now()+4000
+    ;(h.service as any).callbacks.mayWaitForNext=()=> '已有预约到时，预留切换时间'
+    await h.service.tick()
+    assert.match(h.service.doneReason,/已有预约/)
+    assert.equal(Object.values(h.repo.account().rounds)[0].result,'unknown')
+  }finally{await h.finish()}
 })
 
 test('click without confirmation is a submitted unknown, never a success', async () => {

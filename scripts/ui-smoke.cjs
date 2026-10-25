@@ -147,6 +147,7 @@ module.exports = async function verifyUI(config, output) {
             name: '示例生活好物直播间',
             status: 'monitoring',
             phase: '等待开奖',
+            timeline: {stage:'draw',startedAt:now-14000,endsAt:now+86000,remainingSeconds:86,taskAt:now-45000,drawAt:now+86000,nextUntil:null},
             fudaiCount: 1,
             hasFanBadge: true,
             remainingSeconds: 86,
@@ -157,8 +158,8 @@ module.exports = async function verifyUI(config, output) {
         fixture.state.candidateCount = 2
         fixture.state.pendingVerifyCount = 3
         fixture.state.candidates = [
-          { url: url + '2', name: '示例数码好物', score: 0.2, remainingSeconds: 245, entryRemainingSeconds:155, probability: null },
-          { url: url + '3', name: '示例家居直播', score: 0.3, remainingSeconds: 480, entryRemainingSeconds:390, probability: 0.02 }
+          { url: url + '2', name: '示例数码好物', lotteryId:'next-1',cost:0,verifiedAt:now-145000,startAt:now+155000,taskAt:now+200000,drawAt:now+245000,score: 0.2, remainingSeconds: 245, entryRemainingSeconds:155, probability: null },
+          { url: url + '3', name: '示例家居直播', lotteryId:'next-2',cost:1,verifiedAt:now-110000,startAt:now+390000,taskAt:now+435000,drawAt:now+480000,score: 0.3, remainingSeconds: 480, entryRemainingSeconds:390, probability: 0.02 }
         ]
         fixture.insights.rooms = Array.from({ length: 18 }, (_, i) => ({
           url: i ? url + i : url,
@@ -215,6 +216,8 @@ module.exports = async function verifyUI(config, output) {
           activeMinutes: 36
         }
         emit('run-stats:update', fixture.totals)
+        fixture.insights.reports=[{id:'live',startedAt:now-720000,endedAt:null,activeMs:720000,reason:'',source:'首页',budgetCycle:0,confirmed:4,won:1,lost:2,unknown:0,pending:1,spent:1,reserved:0,skipReasons:{}}]
+        fixture.insights.rounds.push({key:'current',roomUrl:url,lotteryId:'current',createdAt:now-34000,drawAt:now+86000,confirmedAt:now-20000,result:'pending',budgetCycle:0})
         fixture.rooms.forEach((room) => emit('room:update', room))
         emit('auto-run:update', fixture.state)
         emit('log:add', {
@@ -332,6 +335,7 @@ module.exports = async function verifyUI(config, output) {
           claim:async(key,claimed)=>{count('claim');fixture.insights.rounds.find(r=>r.key===key).claimed=claimed;return {success:true}},
           get: async () => (fixture.loggedIn ? copy(fixture.insights) : null),
           room: async (roomUrl, patch) => {
+            fixture.lastRoomPatch = copy(patch)
             if (fixture.rejectRoomChange) return { success: false, error: '模拟房间设置保存失败' }
             Object.assign(
               fixture.insights.rooms.find((room) => room.url === roomUrl),
@@ -432,7 +436,56 @@ module.exports = async function verifyUI(config, output) {
     await page.getByRole('button', { name: '立即停止', exact: true }).waitFor()
     await page.evaluate(() => window.__fixture.populate())
     await page.getByText('示例生活好物直播间', { exact: true }).waitFor()
+    await page.evaluate(()=>{const f=window.__fixture;f.originalCandidateName=f.state.candidates[0].name;f.state.candidates[0].name=f.state.candidates[0].url;f.emit('auto-run:update',f.state)})
+    check(/^直播间 \d+$/.test(await page.locator('.reservation-heading h3').first().textContent()),'unnamed candidate uses room ID instead of URL')
+    await page.locator('.reservation-details summary').first().click()
+    check(await page.locator('.reservation-details .room-address').first().isVisible(),'full candidate URL remains in expanded details')
+    await page.locator('.reservation-details summary').first().click()
+    await page.evaluate(()=>{const f=window.__fixture;f.state.candidates[0].name=f.originalCandidateName;f.emit('auto-run:update',f.state)})
+
+    await page.getByRole('region',{name:'运行数据',exact:true}).getByText('活跃 12.0 分钟',{exact:true}).waitFor()
+    check(!(await page.locator('#run-plan').isVisible()),'running defaults to compact controls and hidden strategy')
+    check(await page.getByRole('button',{name:'立即停止',exact:true}).isVisible(),'immediate stop is always visible when strategy is collapsed')
+    check((await page.getByRole('progressbar',{name:'示例数码好物 距离返房进度',exact:true}).getAttribute('aria-valuenow'))==='48','return progress follows pushed countdown')
+    await page.waitForTimeout(1100)
+    check((await page.getByRole('progressbar',{name:'示例数码好物 距离返房进度',exact:true}).getAttribute('aria-valuenow'))==='48','renderer does not decrement its own timer')
+    await page.getByRole('button',{name:'查看策略',exact:true}).click()
+    check(await page.locator('#run-plan').isVisible(),'strategy can be expanded during a run')
+    await page.getByRole('button',{name:'收起策略',exact:true}).click()
+    await page.locator('.app-notice.success').waitFor({state:'hidden'})
     await page.screenshot({ path: path.join(output, 'ui-overview-running.png'), fullPage: true })
+    check((await page.locator('.room-timeline [aria-current="step"] strong').textContent())==='开奖与核对','phase highlight follows main-process draw stage')
+    check((await page.getByRole('progressbar',{name:'开奖与核对',exact:true}).getAttribute('aria-valuenow'))==='14','draw progress uses its own confirmed-to-draw interval')
+    await page.evaluate(()=>{const f=window.__fixture;f.savedTimeline={...f.rooms[0].timeline};f.rooms[0].phase='等待评论反馈';f.rooms[0].timeline={...f.savedTimeline,stage:'prepare',endsAt:null,remainingSeconds:null};f.emit('room:update',f.rooms[0])})
+    check((await page.getByRole('progressbar',{name:'准备任务',exact:true}).getAttribute('aria-valuenow'))===null,'unknown task completion duration has no fabricated percentage')
+    await page.screenshot({path:path.join(output,'ui-task-preparing.png'),fullPage:true})
+    await page.evaluate(()=>{const f=window.__fixture;const now=Date.now();f.rooms[0].phase='等待下一轮福袋';f.rooms[0].timeline={...f.savedTimeline,stage:'next',startedAt:now-10000,endsAt:now+20000,remainingSeconds:20,nextUntil:now+20000};f.emit('room:update',f.rooms[0])})
+    check((await page.locator('.room-timeline [aria-current="step"] strong').textContent())==='观察续轮','next-round observation activates its own segment')
+    check((await page.locator('.room-timeline .done').count())===2,'completed phases fill only their own segments')
+    await page.screenshot({path:path.join(output,'ui-task-next-round.png'),fullPage:true})
+    await page.evaluate(()=>{const f=window.__fixture;f.rooms[0].phase='等待开奖';f.rooms[0].timeline=f.savedTimeline;f.emit('room:update',f.rooms[0])})
+
+    await page.evaluate(()=>{
+      const f=window.__fixture;f.savedCandidates=JSON.parse(JSON.stringify(f.state.candidates))
+      f.state.candidates[0].entryRemainingSeconds=75;f.phase('running')
+    })
+    check((await page.getByRole('progressbar',{name:'示例数码好物 距离返房进度',exact:true}).getAttribute('aria-valuenow'))==='75','new main-process countdown advances return progress')
+    await page.evaluate(()=>{
+      const f=window.__fixture;f.state.candidates=JSON.parse(JSON.stringify(f.savedCandidates))
+      for(let i=0;i<3;i++)f.state.candidates.push({...f.savedCandidates[1],url:'https://live.douyin.com/'+(90000001+i),lotteryId:'extra-'+i,name:i===0?'很长的直播间名称用于验证布局换行与预约列表的可读性：家居生活好物分享专场':'后续预约房间 '+(i+1),cost:i===0?null:0,verifiedAt:i===0?undefined:f.savedCandidates[1].verifiedAt})
+      f.state.candidateCount=5;f.phase('running')
+    })
+    check((await page.locator('.reservation').count())===5,'all five reservations remain individually legible')
+    check((await page.locator('.reservation').nth(2).getByRole('progressbar').count())===0,'unknown timing has no fabricated progress')
+    await page.setViewportSize({width:390,height:844})
+    check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'five long-name candidates fit a narrow viewport')
+    await page.screenshot({path:path.join(output,'ui-running-mobile.png'),fullPage:true})
+    await page.setViewportSize({width:1180,height:820})
+    await page.getByLabel('界面语言').selectOption('en-US')
+    check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'running dashboard fits English labels')
+    await page.screenshot({path:path.join(output,'ui-running-english.png'),fullPage:true})
+    await page.getByLabel('Interface language').selectOption('zh-CN')
+    await page.evaluate(()=>{const f=window.__fixture;f.state.candidates=f.savedCandidates;f.state.candidateCount=2;f.phase('running')})
     await page.evaluate(()=>{
       const f=window.__fixture
       f.emit('log:add',{roomId:f.rooms[0].id,roomName:'离房后仍可搜索的房间',message:'离线结算记录',time:Date.now()})
@@ -444,6 +497,13 @@ module.exports = async function verifyUI(config, output) {
     check(await page.getByRole('heading',{name:'等待候选预约进房，暂不验证其他房间',exact:true}).isVisible(),'empty room shows reservation wait rather than exploration')
     await page.evaluate(()=>window.__fixture.phase('resting'))
     check(await page.locator('.empty-state').getByRole('heading',{name:'计划休息中',exact:true}).isVisible(),'empty room shows planned rest')
+    await page.evaluate(()=>{const f=window.__fixture;f.state.session.stopAt=f.state.session.nextResumeAt-60000;f.emit('auto-run:update',f.state)})
+    check(await page.locator('.empty-state').getByRole('heading',{name:'等待定时结束',exact:true}).isVisible(),'terminal wait is distinct from planned rest')
+    check((await page.locator('.control-deadline').textContent()).includes('定时结束'),'terminal wait shows stop time instead of resume countdown')
+    check(await page.getByText('本轮已完成，等待定时结束',{exact:true}).first().isVisible(),'terminal wait explains no further round is expected')
+    await page.screenshot({path:path.join(output,'ui-waiting-scheduled-stop.png'),fullPage:true})
+    await page.evaluate(()=>window.__fixture.phase('resting'))
+
     await page.evaluate(()=>{
       const f=window.__fixture;f.rooms=f.savedRooms;f.rooms.forEach(r=>f.emit('room:update',r));f.state.waitingReason='';f.phase('running')
     })
@@ -506,24 +566,36 @@ module.exports = async function verifyUI(config, output) {
     )
     await nav('房间库').click()
     await page.getByText('示例生活好物直播间', { exact: true }).waitFor()
-    check((await page.getByRole('row').count()) === 16, 'room library is paginated')
+    check((await page.locator('.room-history-row').count()) === 15, 'room library is paginated')
     await page.evaluate(() => {
       window.__fixture.rejectRoomChange = true
     })
-    const favorite = page.getByRole('checkbox', { name: '示例生活好物直播间 收藏', exact: true })
-    await favorite.click()
+    const block = page.getByRole('button', { name: '示例生活好物直播间 屏蔽', exact: true })
+    check((await page.locator('.room-library input[type=checkbox]').count())===0,'room library removes manual permission and favorite switches')
+    await block.click()
     await page.getByText('模拟房间设置保存失败', { exact: true }).waitFor()
-    check(await favorite.isChecked(), 'failed room changes keep the persisted checkbox state')
+    check(await block.isVisible(), 'failed block leaves persisted room state unchanged')
+    check(JSON.stringify(await page.evaluate(()=>window.__fixture.lastRoomPatch))===JSON.stringify({blocked:true}),'room action only changes blocking')
     await page.evaluate(() => {
       window.__fixture.rejectRoomChange = false
     })
     await page.getByRole('button', { name: '关闭提示', exact: true }).click()
     await page.getByRole('button', { name: '下一页', exact: true }).click()
-    check((await page.getByRole('row').count()) === 4, 'room library next page works')
+    check((await page.locator('.room-history-row').count()) === 3, 'room library next page works')
     await page.getByLabel('搜索房间', { exact: true }).fill('生活')
-    check((await page.getByRole('row').count()) === 2, 'search filters and resets pagination')
+    check((await page.locator('.room-history-row').count()) === 1, 'search filters and resets pagination')
+    await block.click()
+    await page.getByRole('button',{name:'示例生活好物直播间 取消屏蔽',exact:true}).waitFor()
+    check((await page.evaluate(()=>window.__fixture.insights.rooms[0].allowPaid))===true,'blocking preserves historical payment permission')
+    await page.getByRole('button',{name:'示例生活好物直播间 取消屏蔽',exact:true}).click()
+    await block.waitFor()
+    await page.locator('.room-history-detail summary').click()
+    check(await page.getByText('上次观察到的资格',{exact:true}).isVisible(),'room eligibility is clearly historical')
     await page.getByLabel('搜索房间', { exact: true }).fill('')
-    await page.screenshot({ path: path.join(output, 'ui-library.png'), fullPage: true })
+    await page.getByLabel('搜索房间', { exact: true }).blur()
+    if(await page.getByRole('button',{name:'关闭提示',exact:true}).isVisible())await page.getByRole('button',{name:'关闭提示',exact:true}).click()
+    await page.evaluate(()=>window.scrollTo(0,0))
+    await page.screenshot({ path: path.join(output, 'ui-library.png') })
     await page.evaluate(() => {
       window.__fixture.insights.payments[0].state = 'unresolved'
       window.__fixture.insights.budget.spent = 6
@@ -552,8 +624,16 @@ module.exports = async function verifyUI(config, output) {
       (await page.evaluate(() => window.__fixture.insights.payments[0].state)) === 'unresolved',
       'cancelling reconciliation leaves the ledger unchanged'
     )
+    await page.getByRole('button',{name:'支出账本',exact:true}).click()
+    check(await page.locator('.payment-table').getByText('支付待核对',{exact:true}).isVisible(),'unresolved payments are not labelled successful')
+    check(await page.locator('.payment-table').getByText('仍占用预算',{exact:true}).isVisible(),'pending charges still visibly occupy budget')
+    await page.getByRole('button',{name:'参与记录',exact:true}).click()
     await page.screenshot({ path: path.join(output, 'ui-records-review.png'), fullPage: true })
     await nav('运行日志').click()
+    await page.evaluate(()=>{const f=window.__fixture;f.emit('log:add',{roomId:'system',time:Date.now(),message:'较早测试事件'});f.emit('log:add',{roomId:'system',time:Date.now(),message:'最新测试事件'})})
+    check((await page.locator('.log-line p').first().textContent())==='最新测试事件','newest log is first even when timestamps match')
+    check(await page.getByLabel('跟随最新',{exact:true}).isChecked(),'log follows the newest events by default')
+
     await page.getByLabel('搜索日志',{exact:true}).fill('离房后仍可搜索的房间')
     check(await page.getByText('离线结算记录',{exact:true}).isVisible(),'log name survives room removal and remains searchable')
     await page.getByLabel('搜索日志', { exact: true }).fill('不存在')
@@ -572,6 +652,10 @@ module.exports = async function verifyUI(config, output) {
           await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
           `no page overflow at ${size.width}px: ${destination}`
         )
+        if(size.width===390 && ['房间库','运行记录'].includes(destination)){
+          await page.evaluate(()=>window.scrollTo(0,0))
+          await page.screenshot({path:path.join(output, destination==='房间库'?'ui-library-mobile.png':'ui-records-mobile.png'),fullPage:true})
+        }
       }
       await nav('运行面板').click()
       await page.screenshot({ path: path.join(output, `ui-narrow-${size.width}.png`), fullPage: true })
@@ -626,14 +710,93 @@ module.exports = async function verifyUI(config, output) {
     check(await page.getByText('共 1 条',{exact:true}).isVisible(),'filtered count is accurate')
     await page.getByText('预算轮次历史',{exact:true}).click()
     check(await page.getByText('支出 7 钻 / 预留 0 钻',{exact:true}).isVisible(),'budget cycle history is visible')
+    await page.locator('.report-archive > summary').click()
     await page.locator('.run-report summary').click()
-    check(await page.getByText('活跃 1.0 分钟',{exact:true}).isVisible(),'run report separates active time')
-    check(await page.getByText('未知 1',{exact:true}).isVisible(),'report retains unknown results')
+    check(await page.locator('.report-facts').getByText('活跃 1.0 分钟',{exact:true}).isVisible(),'run report separates active time')
+    check(await page.locator('.report-facts').getByText('未知 1',{exact:true}).isVisible(),'report retains unknown results')
+    await page.evaluate(()=>window.scrollTo(0,0))
     await page.screenshot({path:path.join(output,'ui-product-review.png'),fullPage:true})
+    await page.getByLabel('记录状态',{exact:true}).selectOption('')
+    await page.evaluate(()=>{
+      const f=window.__fixture
+      f.insights.rounds[0].runId='run'
+      f.insights.rounds[319].runId='run'
+      f.insights.decisions=[{at:Date.now(),url:f.insights.rounds[0].roomUrl,action:'skip',reason:'剩余时间不足以完成任务',score:null,probability:null},{at:Date.now()-60000,url:f.insights.rounds[0].roomUrl,action:'candidate',reason:'任务可完成，已加入预约队列',score:0.2,probability:0.02}]
+      f.insights.payments=[{id:'scope-payment',runId:'run',roomUrl:f.insights.rounds[0].roomUrl,roundKey:'round-0',at:Date.now(),cost:1,newClub:false,state:'confirmed'}]
+    })
+    await nav('房间库').click();await nav('运行记录').click()
+    await page.getByLabel('运行范围',{exact:true}).selectOption('run')
+    await page.waitForFunction(()=>document.querySelectorAll('.data-surface tbody tr').length===2)
+    check((await page.getByRole('row').count())===3,'selected run includes only persisted ownership including late reward')
+    check((await page.locator('.entry-confirmation').filter({hasText:'已确认参与'}).count())===2,'entry rows separate confirmation from draw result')
+    check((await page.locator('.entry-table .cell-title').first().innerText())==='直播间 10000001','missing room name uses readable ID instead of raw URL')
+    await page.locator('.entry-table .record-evidence summary').first().click()
+    check(await page.locator('.entry-table').getByText('福袋编号',{exact:true}).first().isVisible(),'submission timestamps and bag identity remain in details')
+    await page.locator('.entry-table .record-evidence summary').first().click()
+
+    check((await page.locator('.record-headline strong').first().innerText())==='2','run summary follows the selected scope')
+    await page.getByRole('button',{name:'支出账本',exact:true}).click()
+    check((await page.getByRole('row').count())===2,'payment tab preserves run scope')
+    check(await page.locator('.payment-table').getByText('已确认扣款',{exact:true}).isVisible(),'payment ledger explicitly distinguishes confirmed spending')
+    await page.evaluate(()=>window.scrollTo(0,0))
+    await page.screenshot({path:path.join(output,'ui-payments-focused.png'),fullPage:true})
+
+    await page.getByLabel('运行范围',{exact:true}).selectOption('unassigned')
+    check(await page.getByRole('heading',{name:'没有匹配的记录',exact:true}).isVisible(),'legacy scope does not infer newer payment ownership')
+    await page.getByRole('button',{name:'参与记录',exact:true}).click()
+    check(await page.getByText('共 318 条',{exact:true}).isVisible(),'unassigned history remains accessible')
+    await page.getByLabel('运行范围',{exact:true}).selectOption('run')
+    await page.getByRole('button',{name:'选择依据',exact:true}).click()
+    check((await page.getByLabel('运行范围',{exact:true}).count())===0,'unowned decisions are not misrepresented as run-specific')
+    check((await page.locator('.decision-event').count())===2,'decisions use chronological reason-focused rows')
+    await page.locator('.decision-event .record-evidence summary').first().click()
+    check(await page.locator('.decision-event').first().getByText('无法估计',{exact:false}).isVisible(),'missing probability remains unknown in decision details')
+    await page.locator('.decision-event .record-evidence summary').first().click()
+    await page.evaluate(()=>window.scrollTo(0,0))
+    await page.screenshot({path:path.join(output,'ui-decisions-focused.png'),fullPage:true})
+
+    await page.getByRole('button',{name:'参与记录',exact:true}).click()
+    await page.getByLabel('运行范围',{exact:true}).selectOption('run')
+    await page.locator('.advanced-filters summary').click()
+    await page.getByLabel('记录开始日期',{exact:true}).fill('2099-01-01')
+    check(await page.getByRole('heading',{name:'没有匹配的记录',exact:true}).isVisible(),'advanced dates filter detail rows')
+    check((await page.locator('.record-headline strong').first().innerText())==='2','detail filters do not relabel full-run summary')
+    await page.getByRole('button',{name:'清除筛选',exact:true}).click()
+    await page.locator('.advanced-filters summary').click()
+    await page.locator('.record-actions summary').click()
+    check(await page.getByRole('button',{name:'脱敏导出',exact:true}).isVisible(),'secondary ledger actions remain accessible')
+    await page.locator('.record-actions summary').click()
     await page.getByRole('button',{name:'稍后查看提醒',exact:true}).click()
     check((await page.evaluate(()=>window.__fixture.calls.dismissAlert))===1,'popup can be dismissed')
+    if(await page.getByRole('button',{name:'关闭提示',exact:true}).isVisible())await page.getByRole('button',{name:'关闭提示',exact:true}).click()
+    await page.evaluate(()=>window.scrollTo(0,0))
+    await page.screenshot({path:path.join(output,'ui-records-focused.png'),fullPage:true})
+    for(const [tabName,file] of [['支出账本','ui-payments-focused.png'],['选择依据','ui-decisions-focused.png']]){
+      await page.getByRole('button',{name:tabName,exact:true}).click()
+      await page.mouse.move(0,0)
+      await page.evaluate(()=>window.scrollTo(0,0))
+      await page.screenshot({path:path.join(output,file),fullPage:true,animations:'disabled'})
+    }
+    await page.getByRole('button',{name:'参与记录',exact:true}).click()
+    await page.evaluate(()=>{const r=window.__fixture.insights.rounds[319];r.prizeType='diamond';r.prizeName=null;r.diamondAmount=0})
+    await page.getByLabel('记录状态',{exact:true}).selectOption('won')
+    await page.locator('.reward-amount').waitFor()
+    check((await page.locator('.reward-amount').innerText()).includes('0'),'explicit zero reward remains zero rather than missing')
+    await page.evaluate(()=>{window.__fixture.insights.rounds[319].diamondAmount=null})
+    await page.locator('.entry-table').getByText('数量待确认',{exact:true}).waitFor()
+    check((await page.locator('.reward-amount').count())===0,'unknown diamond quantity is not rendered as zero')
+    await page.evaluate(()=>{window.__fixture.insights.rounds[319].result='unknown'})
+    await page.getByLabel('记录状态',{exact:true}).selectOption('unknown')
+    await page.locator('.entry-table').getByText('暂无已确认奖励',{exact:true}).waitFor()
+    check((await page.locator('.reward-title').count())===0,'unknown outcomes do not display candidate prize data as winnings')
+    await page.getByRole('button',{name:'支出账本',exact:true}).click()
+    await page.evaluate(()=>{window.__fixture.insights.payments[0].state='reserved'})
+    await page.locator('.payment-table').getByText('仅预留，未付款',{exact:true}).waitFor()
+    check(await page.locator('.payment-table').getByText('仍占用预算',{exact:true}).isVisible(),'reservation remains held and is not presented as a charge')
+
     await nav('运行面板').click()
     await page.evaluate(()=>{const f=window.__fixture;f.state.candidates=[{url:'https://live.douyin.com/10000002',name:'可移除候选',lotteryId:'x',cost:1,startAt:Date.now()+30000,taskAt:Date.now()+75000,entryRemainingSeconds:30,remainingSeconds:120}];f.phase('running')})
+    await page.locator('.reservation-details summary').click()
     await page.getByRole('button',{name:'今天跳过',exact:true}).click()
     check((await page.evaluate(()=>window.__fixture.calls.skipToday))===1,'skip today dispatches once')
     await page.getByRole('button',{name:'本轮结束后停止',exact:true}).click()

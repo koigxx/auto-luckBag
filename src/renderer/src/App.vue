@@ -75,7 +75,7 @@ const navItems: { id: View; icon: string; zh: string; en: string; description: [
     icon: 'rooms',
     zh: '房间库',
     en: 'Room library',
-    description: ['管理值得复访的直播间与付费许可。', 'Manage rooms to revisit and membership permissions.']
+    description: ['查看房间历史、验证结果与屏蔽状态。', 'Review room history, checks and blocked rooms.']
   },
   {
     id: 'records',
@@ -199,7 +199,7 @@ async function recordAction(
           }}</span>
         </div>
         <p>{{ tr('低频串行，按计划休息', 'One room at a time, with planned breaks') }}</p>
-        <small>V0.3.0</small>
+        <small>v1.0.0</small>
       </div>
     </aside>
     <div class="workspace">
@@ -246,7 +246,7 @@ async function recordAction(
         </div>
       </header>
       <main id="main-content" class="main-content">
-        <div class="page-heading">
+        <div class="page-heading" :class="{'monitoring-heading': view === 'dashboard' && running}">
           <div>
             <h1>{{ tr(current.zh, current.en) }}</h1>
             <p>{{ tr(...current.description) }}</p>
@@ -327,6 +327,7 @@ async function recordAction(
             :running="running"
             :language="language"
             :busy="busy"
+            :membership="config.policy.membership"
             :on-action="recordAction"
             :on-reset="resetRunStats"
             @login="login"

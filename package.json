@@ -36,7 +36,7 @@
   },
   "build": {
     "appId": "com.luckbag.app",
-    "productName": "抖音福袋助手V0.3.0",
+    "productName": "抖音福袋助手v1.0.0",
     "directories": {
       "output": "dist-electron"
     },

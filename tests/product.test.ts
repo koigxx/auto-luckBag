@@ -5,8 +5,44 @@ import {SessionEngine} from '../src/main/session-engine'
 import {DEFAULT_POLICY} from '../src/shared/policy'
 import {defaults,participationPreset} from '../src/shared/config'
 import {runReports,budgetCycles,pendingAlerts,sortAlerts} from '../src/shared/review'
+import {inRun,recordTotals,roomDisplayName} from '../src/shared/record-presentation'
+import {returnProgress,timeProgress} from '../src/shared/display-progress'
 const url='https://live.douyin.com/12345678'
+test('display progress uses pushed time, keeps unknown unknown, and clamps deadline boundaries',()=>{
+  assert.equal(returnProgress({verifiedAt:1000,startAt:101000,entryRemainingSeconds:60}),40)
+  assert.equal(returnProgress({verifiedAt:1000,startAt:101000,entryRemainingSeconds:0}),100)
+  assert.equal(timeProgress(1000,101000,150),0)
+  assert.equal(timeProgress(1000,101000,-1),100)
+  assert.equal(timeProgress(null,101000,10),null)
+  assert.equal(timeProgress(1000,1000,0),null)
+  assert.equal(timeProgress(1000,101000,NaN),null)
+  assert.equal(returnProgress({startAt:101000,entryRemainingSeconds:60}),null)
+})
 function fixture(){let data=emptyRuntime(),now=Date.UTC(2026,9,25,2);const repo=new RuntimeRepository({read:()=>data,write:d=>{data=structuredClone(d)}},()=>now);repo.bind('a',{spent:0,stats:{},rooms:[]});repo.room(url);return {repo,advance:(ms:number)=>now+=ms}}
+test('record room titles preserve known names and use room IDs without inventing names',()=>{
+  assert.equal(roomDisplayName(' 某主播 ',url),'某主播')
+  assert.equal(roomDisplayName('直播中',url),'直播间 12345678')
+  assert.equal(roomDisplayName(undefined,url,true),'Room 12345678')
+  assert.equal(roomDisplayName(url,url),'直播间 12345678')
+  assert.equal(roomDisplayName(undefined,''),'系统')
+  assert.equal(roomDisplayName(undefined,'not-a-url'),'未记录名称的直播间')
+})
+test('record scopes use persisted run ownership and keep unresolved spending separate',()=>{
+  assert.equal(inRun({runId:'old'},'new'),false)
+  assert.equal(inRun({runId:'old'},'old'),true)
+  assert.equal(inRun({},'unassigned'),true)
+  assert.equal(inRun({},'old'),false)
+  assert.equal(inRun({runId:'old'},''),true)
+  assert.equal(inRun({runId:'old'},'unassigned'),false)
+  const {repo:r}=fixture()
+  r.record(url,'won',{confirmedAt:r.now(),result:'won'})
+  r.record(url,'unknown',{result:'unknown'})
+  r.record(url,'cancelled',{result:'cancelled'})
+  const p=r.reserve(url,'won',1,50,false,DEFAULT_POLICY);r.payment(p.id,'confirmed')
+  const q=r.reserve(url,'unknown',1,50,false,DEFAULT_POLICY);r.payment(q.id,'submitted');r.payment(q.id,'unresolved')
+  const total=recordTotals(Object.values(r.account().rounds),Object.values(r.account().payments))
+  assert.deepEqual(total,{confirmed:1,won:1,lost:0,unknown:1,pending:0,spent:1,reserved:1})
+})
 test('run reports persist one run across rest, attribute money and late results, preserve first ending',()=>{
   const h=fixture(),r=h.repo,e=new SessionEngine(r,()=>0.5)
   e.start(DEFAULT_POLICY);r.beginRun('home');r.record(url,'one',{confirmedAt:r.now(),result:'unknown'})

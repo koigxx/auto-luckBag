@@ -1,8 +1,13 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { AppConfig, AutoRunState, RoomInfo, RunStats, Stats } from '../types'
 import type { Insights } from '../../../shared/insights'
 import UiIcon from './UiIcon.vue'
+import OutcomeBar from './OutcomeBar.vue'
+import RoomStageTimeline from './RoomStageTimeline.vue'
+import { roomDisplayName } from '../../../shared/record-presentation'
+import { waitingForScheduledStop } from '../../../shared/run-presentation'
+import { returnProgress } from '../../../shared/display-progress'
 const props = defineProps<{
   config: AppConfig
   loggedIn: boolean
@@ -31,14 +36,29 @@ const tr = (zh: string, en: string) => (props.config.language === 'en-US' ? en :
 const sourceUrl = ref('https://live.douyin.com')
 const stopAfter = ref<number | ''>('')
 const phase = computed(() => props.state?.status || 'stopped')
+const timedWaiting = computed(() => !!props.state?.session && waitingForScheduledStop(props.state.session))
+const candidateName = (candidate: {name:string;url:string}) => roomDisplayName(candidate.name,candidate.url,props.config.language==='en-US')
 const active = computed(() => !!props.state?.running)
+const strategyOpen = ref(false)
+watch(active, () => { strategyOpen.value = false })
+const report = computed(() => active.value
+  ? props.insights?.reports?.find(r => r.endedAt === null)
+  : props.insights?.reports?.[0])
+const dailyUse = computed(() => Math.min(100, Math.max(0, (props.insights?.metrics.activeMinutes ?? 0) / props.config.policy.dailyMinutes * 100)))
+function roomCountdown(room: RoomInfo) {
+  const t = room.timeline
+  if(t?.stage==='next')return {label:tr('续轮观察剩余','Next-round observation'),seconds:t.remainingSeconds}
+  if(t?.stage==='prepare' && t.endsAt!==null)return {label:tr('距离执行任务','Tasks begin in'),seconds:t.remainingSeconds}
+  if(t?.stage==='draw' && room.remainingSeconds===0)return {label:tr('结果核对剩余','Result check remaining'),seconds:t.remainingSeconds}
+  return {label:tr('距离开奖','Draw in'),seconds:room.remainingSeconds}
+}
 const held = computed(
   () => phase.value === 'blocked' || !!props.insights?.payments.some((p) => p.state === 'unresolved')
 )
 const labels = computed(() => ({
   running: tr('正在运行', 'Running'),
   draining: tr('正在收尾', 'Finishing up'),
-  resting: tr('计划休息中', 'On a planned break'),
+  resting: timedWaiting.value ? tr('等待定时结束','Waiting for scheduled stop') : tr('计划休息中', 'On a planned break'),
   'resume-check': tr('检查恢复条件', 'Checking before resume'),
   blocked: tr('需要你处理', 'Needs your attention'),
   stopped: tr('已停止', 'Stopped')
@@ -69,7 +89,7 @@ const description = computed(() =>
           '有风险提示或未决支付。前往运行记录核对，处理后手动启动。',
           'A risk hold or unresolved payment needs review in Records before a manual restart.'
         )
-      : props.state?.session?.reason ||
+      : timedWaiting.value ? tr('本轮已完成，等待定时结束','This round is complete; waiting for the scheduled stop') : props.state?.session?.reason ||
         props.state?.waitingReason ||
         (active.value
           ? tr(
@@ -109,6 +129,8 @@ const time = (value: number | null | undefined) =>
   value
     ? new Date(value).toLocaleTimeString(props.config.language, { hour: '2-digit', minute: '2-digit' })
     : '—'
+const scheduleTime = (value: number | null | undefined) => value == null ? '—' :
+  new Date(value).toLocaleTimeString(props.config.language, {hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false})
 const duration = (value: number | null | undefined) =>
   value == null ? '—' : `${Math.floor(value / 60)}:${String(value % 60).padStart(2, '0')}`
 function start() {
@@ -121,8 +143,20 @@ function start() {
 
 <template>
   <div class="dashboard-view">
-    <div class="overview-grid">
-      <section
+    <section v-if="active" class="live-control surface" :aria-label="tr('运行控制', 'Run controls')">
+      <div class="live-control-main">
+        <span class="live-beacon" :class="{resting: phase === 'resting'}"><UiIcon :name="phase === 'resting' ? 'pause' : 'play'" /></span>
+        <div class="live-control-copy"><h2>{{ title }}</h2><p>{{ description }}</p></div>
+        <div class="control-deadline"><span>{{ timedWaiting ? tr('定时结束','Scheduled stop') : phase === 'resting' ? tr('距离恢复','Resume in') : tr('本段截止','Session ends') }}</span><strong>{{ timedWaiting ? time(state?.session?.stopAt) : phase === 'resting' ? duration(state?.resumeRemainingSeconds) : time(state?.session?.hardStopAt) }}</strong></div>
+      </div>
+      <div class="live-control-actions">
+        <button class="button small" :aria-expanded="strategyOpen" aria-controls="run-plan" @click="strategyOpen = !strategyOpen"><UiIcon name="settings" :size="16" />{{ strategyOpen ? tr('收起策略','Hide strategy') : tr('查看策略','View strategy') }}</button>
+        <button class="button small" :disabled="busy.finish || state?.session?.finishRequested || busy.stop" @click="emit('finish')">{{ state?.session?.finishRequested ? tr('正在等待本轮结束','Finishing current round') : tr('本轮结束后停止','Stop after this round') }}</button>
+        <button class="button stop small" :disabled="busy.stop" @click="emit('stop')"><UiIcon name="stop" :size="16" />{{ busy.stop ? tr('正在停止…','Stopping…') : tr('立即停止','Stop now') }}</button>
+      </div>
+    </section>
+    <div v-show="!active || strategyOpen" id="run-plan" class="overview-grid" :class="{'compact-plan': active}">
+      <section v-if="!active"
         class="run-stage"
         :class="{ 'is-active': active, 'needs-attention': held }"
         aria-labelledby="run-title"
@@ -140,24 +174,6 @@ function start() {
         </div>
         <h2 id="run-title">{{ title }}</h2>
         <p class="stage-description">{{ description }}</p>
-        <div v-if="active" class="session-times">
-          <div>
-            <span>{{
-              phase === 'resting' ? tr('距离恢复', 'Resume in') : tr('本段截止', 'Session ends')
-            }}</span
-            ><strong>{{
-              phase === 'resting' ? duration(state?.resumeRemainingSeconds) : time(state?.session?.hardStopAt)
-            }}</strong>
-          </div>
-          <div>
-            <span>{{ tr('候选房间', 'Candidates') }}</span
-            ><strong>{{ state?.candidateCount ?? 0 }}</strong>
-          </div>
-          <div>
-            <span>{{ tr('等待验证', 'To verify') }}</span
-            ><strong>{{ state?.pendingVerifyCount ?? 0 }}</strong>
-          </div>
-        </div>
         <div class="stage-actions">
           <button v-if="authState === 'checking' || authState === 'unknown'" class="button primary large" :disabled="authState === 'checking'" @click="emit('checkLogin')">
             {{ authState === 'checking' ? tr('校验中…', 'Checking…') : tr('重新校验', 'Retry verification') }}
@@ -166,9 +182,6 @@ function start() {
             <UiIcon name="user" />{{
               busy.login ? tr('等待完成登录…', 'Waiting for sign-in…') : tr('登录抖音', 'Sign in to Douyin')
             }}
-          </button>
-          <button v-else-if="active" class="button stop large" :disabled="busy.stop" @click="emit('stop')">
-            <UiIcon name="stop" />{{ busy.stop ? tr('正在停止…', 'Stopping…') : tr('立即停止', 'Stop now') }}
           </button>
           <button v-else-if="held" class="button primary large" @click="emit('records')">
             <UiIcon name="alert" />{{ tr('查看待处理事项', 'Review pending items') }}
@@ -194,8 +207,6 @@ function start() {
             }}<UiIcon name="chevron" :size="16" />
           </button>
         </div>
-        <button v-if="active" class="button" :disabled="busy.finish || state?.session?.finishRequested || busy.stop" @click="emit('finish')">{{ state?.session?.finishRequested ? tr('正在等待本轮结束','Finishing current round') : tr('本轮结束后停止','Stop after this round') }}</button>
-        <p v-if="active" class="microcopy">{{ tr('立即停止会取消在途任务；收尾也受本段硬截止限制。','Stop immediately cancels pending tasks. Finishing remains subject to the hard deadline.') }}</p>
         <details v-if="!active && !held" class="run-options">
           <summary>{{ tr('本次运行选项', 'Options for this run') }}</summary>
           <div class="form-grid compact">
@@ -223,7 +234,7 @@ function start() {
       <aside class="plan-summary surface" aria-label="本次计划">
         <div class="section-heading">
           <h2>{{ tr('当前策略', 'Current strategy') }}</h2>
-          <UiIcon name="settings" :size="18" />
+          <button class="inline-link" @click="emit('settings')">{{ tr('调整策略', 'Edit strategy') }}</button>
         </div>
         <dl class="summary-list">
           <div>
@@ -280,29 +291,15 @@ function start() {
         </div>
       </aside>
     </div>
-    <section class="metrics-strip" :aria-label="tr('累计展示统计', 'Display totals')">
-      <div>
-        <span>{{ tr('已确认参与', 'Confirmed entries') }}</span
-        ><strong>{{ totals?.participated ?? 0 }}</strong
-        ><small>{{ tr('已收到参与反馈', 'Participation acknowledged') }}</small>
+    <section class="run-monitor surface" :aria-label="tr('运行数据', 'Run data')">
+      <div class="monitor-heading"><h2>{{ active ? tr('本次运行','This run') : tr('最近一次运行','Latest run') }}</h2><span>{{ report ? tr(`活跃 ${(report.activeMs / 60000).toFixed(1)} 分钟`, `${(report.activeMs / 60000).toFixed(1)} active min`) : tr('启动后生成独立运行数据','An independent report starts with each run') }}</span><button class="inline-link" @click="emit('records')">{{ tr('查看运行记录','View records') }}<UiIcon name="chevron" :size="14" /></button></div>
+      <div class="run-numbers">
+        <div><span><UiIcon name="check" :size="16" />{{ tr('确认参与','Confirmed entries') }}</span><strong>{{ report?.confirmed ?? '—' }}</strong><small>{{ tr('已收到本人参与反馈','Personal participation acknowledged') }}</small></div>
+        <div><span><UiIcon name="gift" :size="16" />{{ tr('中奖轮次','Winning rounds') }}</span><strong>{{ report?.won ?? '—' }}</strong><small>{{ tr('仅统计明确开奖结果','Explicit results only') }}</small></div>
+        <div><span><UiIcon name="diamond" :size="16" />{{ tr('本次支出','Run spending') }}</span><strong>{{ report?.spent ?? '—' }}<small>{{ tr('钻','diamonds') }}</small></strong><small>{{ tr('待确认占额','Pending allocation') }} {{ report?.reserved ?? '—' }}</small></div>
+        <div><span><UiIcon name="clock" :size="16" />{{ tr('已预约 / 待验证','Queued / to verify') }}</span><strong>{{ state?.candidateCount ?? 0 }}<i> / </i>{{ state?.pendingVerifyCount ?? 0 }}</strong><small>{{ tr('按返房时间顺序参与','Join in scheduled return order') }}</small></div>
       </div>
-      <div>
-        <span>{{ tr('实物中奖', 'Physical wins') }}</span
-        ><strong>{{ totals?.physicalWins ?? 0 }}</strong
-        ><small>{{ tr('仅统计本人结果', 'Your results only') }}</small>
-      </div>
-      <div>
-        <span>{{ tr('获得钻石', 'Diamonds won') }}</span
-        ><strong>{{ totals?.diamondWonAmount ?? 0 }}</strong
-        ><small>{{ totals?.diamondWins ?? 0 }} {{ tr('次钻石中奖', 'diamond wins') }}</small>
-      </div>
-      <div>
-        <span>{{ tr('待确认 / 结果未知', 'Unconfirmed / unknown') }}</span
-        ><strong>{{ totals?.submittedUnknown ?? 0 }}<i> / </i>{{ totals?.unknownResults ?? 0 }}</strong
-        ><button class="inline-link" @click="emit('records')">
-          {{ tr('查看运行记录', 'View records') }}
-        </button>
-      </div>
+      <OutcomeBar v-if="report" :won="report.won" :lost="report.lost" :unknown="report.unknown" :pending="report.pending" :language="config.language" />
     </section>
     <div class="activity-grid">
       <section class="surface current-rooms">
@@ -337,29 +334,21 @@ function start() {
             }}
           </p>
         </div>
-        <article v-for="room in rooms" :key="room.id" class="active-room">
-          <div class="room-avatar"><UiIcon name="rooms" /></div>
-          <div class="room-info">
-            <h3>{{ room.name }}</h3>
-            <p>
-              {{ room.phase || room.status
-              }}<span v-if="room.hasFanBadge"> · {{ tr('已有粉丝资格', 'Eligible member') }}</span>
-            </p>
-            <small>{{ tr('本次已结算', 'Rounds settled') }} {{ room.fudaiCount }} {{ tr('轮', '') }}</small>
-          </div>
-          <div class="draw-clock">
-            <span>{{ tr('距离开奖', 'Draw in') }}</span
-            ><strong>{{ duration(room.remainingSeconds) }}</strong>
-          </div>
-          <button
-            class="icon-button"
-            :disabled="busy[`room:${room.id}`]"
-            :aria-label="tr(`结束 ${room.name} 的参与`, `End participation in ${room.name}`)"
-            @click="emit('remove', room.id)"
-          >
-            <UiIcon name="close" :size="18" />
-          </button>
+        <article v-for="room in rooms" :key="room.id" class="live-room-card">
+          <header><span class="room-avatar"><UiIcon name="rooms" /></span><div class="room-info"><h3>{{ roomDisplayName(room.name,room.url,config.language==='en-US') }}</h3><p>{{ room.hasFanBadge ? tr('当前粉丝资格满足','Membership requirement met') : tr('按本轮任务核对资格','Eligibility follows this round’s requirements') }}</p></div><button class="icon-button" :disabled="busy[`room:${room.id}`]" :aria-label="tr(`结束 ${room.name} 的参与`, `End participation in ${room.name}`)" @click="emit('remove',room.id)"><UiIcon name="close" :size="18" /></button></header>
+          <div class="live-room-stage"><span class="status-pill success">{{ room.phase || room.status }}</span><div class="room-countdown"><span>{{roomCountdown(room).label}}</span><strong>{{duration(roomCountdown(room).seconds)}}</strong></div><small v-if="room.timeline?.stage==='prepare' && room.timeline.endsAt!==null" class="stage-draw-note">{{tr('距离开奖','Draw in')}} {{duration(room.remainingSeconds)}}</small></div>
+          <RoomStageTimeline :timeline="room.timeline" :phase="room.phase" :language="config.language" />
+          <footer><span>{{ tr('本次已结算','Rounds settled') }} <b>{{ room.fudaiCount }}</b> {{ tr('轮','') }}</span><span>{{ tr('结果以本人弹窗为准','Only your result counts') }}</span></footer>
         </article>
+        <div class="monitor-resources">
+          <div class="resource-heading"><UiIcon name="diamond" :size="17" /><h3>{{ tr('预算与节奏','Budget & pace') }}</h3></div>
+          <div class="resource-caption"><span>{{ tr('剩余钻石预算','Diamond budget left') }}</span><strong>{{ loggedIn ? budget?.remaining ?? '—' : '—' }}<small> / {{ budget?.effective ?? config.diamondBudget }}</small></strong></div>
+          <div class="resource-meter" role="meter" :aria-label="tr('预算已占用比例','Budget allocated')" :aria-valuenow="usage" aria-valuemin="0" aria-valuemax="100"><span class="spent" :style="{width: `${Math.min(usage, (budget?.spent ?? 0) / (budget?.effective || 1) * 100)}%`}"/><span class="reserved" :style="{width: `${Math.max(0, usage - (budget?.spent ?? 0) / (budget?.effective || 1) * 100)}%`}"/></div>
+          <p class="resource-note">{{ tr(`已用 ${budget?.spent ?? 0} 钻，预留 ${budget?.reserved ?? 0} 钻`, `${budget?.spent ?? 0} spent, ${budget?.reserved ?? 0} reserved`) }}</p>
+          <div class="resource-caption"><span>{{ tr('今日活跃','Active today') }}</span><strong>{{ insights?.metrics.activeMinutes.toFixed(1) ?? '—' }}<small> / {{ config.policy.dailyMinutes }} {{ tr('分钟','min') }}</small></strong></div>
+          <div class="resource-meter" role="meter" :aria-label="tr('今日活跃额度使用比例','Daily active allowance used')" :aria-valuenow="dailyUse" aria-valuemin="0" aria-valuemax="100"><span class="daily" :style="{width: `${dailyUse}%`}" /></div>
+          <p class="resource-note">{{ tr(`运行 ${config.policy.sessionMin}–${config.policy.sessionMax} 分钟后，按计划休息。`, `Planned breaks follow ${config.policy.sessionMin}–${config.policy.sessionMax} active minutes.`) }}</p>
+        </div>
       </section>
       <section class="surface candidates">
         <div class="section-heading">
@@ -381,29 +370,44 @@ function start() {
             }}
           </p>
         </div>
-        <div v-for="candidate in state?.candidates || []" :key="candidate.url" class="candidate-item">
-          <div>
-            <strong>{{ candidate.name }}</strong>
-            <p>{{ tr('预计新增费用','Estimated new cost') }} {{ candidate.cost ?? '—' }} {{ tr('钻','diamonds') }} · {{ tr('任务准备','Task window') }} {{ time(candidate.taskAt) }}</p>
-            <details class="evidence"><summary>{{ tr('预约依据','Reservation details') }}</summary><p>{{ candidate.reason }}</p><p>{{ tr('返房复验','Return check') }} {{ time(candidate.startAt) }} · {{ tr('返房后仍需核对本轮任务和费用','Tasks and costs are checked again on return') }}</p></details>
-            <div class="button-row"><button class="button small" :disabled="!candidate.lotteryId || busy[`candidate:${candidate.url}`]" @click="emit('skip',candidate.url,candidate.lotteryId!,false)">{{ tr('移除本轮','Skip this round') }}</button><button class="button text-button small" :disabled="!candidate.lotteryId || busy[`candidate:${candidate.url}`]" @click="emit('skip',candidate.url,candidate.lotteryId!,true)">{{ tr('今天跳过','Skip today') }}</button></div>
-            <p :title="candidate.reason">
-              {{
-                candidate.probability == null
-                  ? tr('概率未知，按可完成性选择', 'Unknown odds; selected by feasibility')
-                  : tr(
-                      `估计机会 ${(candidate.probability * 100).toFixed(2)}%`,
-                      `Estimated chance ${(candidate.probability * 100).toFixed(2)}%`
-                    )
-              }}
-            </p>
-              <p v-if="candidate.entryRemainingSeconds != null">
-                {{ tr('返房倒计时', 'Return in') }} {{ duration(candidate.entryRemainingSeconds) }}
-              </p>
-          </div>
-            <time>{{ tr('开奖', 'Draw') }} {{ duration(candidate.remainingSeconds) }}</time>
-        </div>
+        <ol v-if="state?.candidates?.length" class="reservation-list">
+          <li v-for="(candidate,index) in state.candidates" :key="`${candidate.url}:${candidate.lotteryId}`" class="reservation" :class="{'is-next': index===0}">
+            <div class="reservation-heading"><span class="queue-position">{{ index+1 }}</span><h3>{{ candidateName(candidate) }}</h3><span class="cost-tag" :class="{free:candidate.cost===0}">{{ candidate.cost === 0 ? tr('零新增费用','No new cost') : candidate.cost == null ? tr('费用待核对','Cost unknown') : tr(`预计 ${candidate.cost} 钻`, `Est. ${candidate.cost} diamonds`) }}</span></div>
+            <div class="reservation-countdown"><span>{{ index===0 ? tr('下一项返房','Next return') : tr('返房倒计时','Return in') }}</span><strong>{{ duration(candidate.entryRemainingSeconds) }}</strong><span class="draw-remaining">{{ tr('距开奖','Draw in') }} <b>{{ duration(candidate.remainingSeconds) }}</b></span></div>
+            <div v-if="returnProgress(candidate) !== null" class="return-progress" role="progressbar" :aria-label="tr(`${candidateName(candidate)} 距离返房进度`, `${candidateName(candidate)} return progress`)" :aria-valuenow="returnProgress(candidate)!" aria-valuemin="0" aria-valuemax="100"><span :style="{width: `${returnProgress(candidate)}%`}" /></div>
+            <div class="reservation-timeline" :aria-label="tr('预约时间安排','Reservation schedule')">
+              <div><span>{{ tr('返房复验','Return check') }}</span><time>{{ scheduleTime(candidate.startAt) }}</time></div><div><span>{{ tr('任务准备','Task window') }}</span><time>{{ scheduleTime(candidate.taskAt) }}</time></div><div><span>{{ tr('开奖','Draw') }}</span><time>{{ scheduleTime(candidate.drawAt) }}</time></div>
+            </div>
+            <details class="reservation-details"><summary>{{ tr('预约依据与操作','Details & actions') }}<UiIcon name="down" :size="14" /></summary><div><p>{{ candidate.reason || tr('按可完成性与时间安排','Scheduled by feasibility and timing') }}</p><p>{{ candidate.probability == null ? tr('概率未知；返房后重新核对资格和费用。','Odds unknown. Eligibility and cost are rechecked on return.') : tr(`等概率假设下估计机会 ${(candidate.probability*100).toFixed(2)}%；返房仍需复验。`, `Estimated chance ${(candidate.probability*100).toFixed(2)}% assuming equal odds; return checks still apply.`) }}</p><p class="room-address">{{ candidate.url }}</p><div class="button-row"><button class="button small" :disabled="!candidate.lotteryId || busy[`candidate:${candidate.url}`]" @click="emit('skip',candidate.url,candidate.lotteryId!,false)">{{ tr('移除本轮','Skip this round') }}</button><button class="button text-button small" :disabled="!candidate.lotteryId || busy[`candidate:${candidate.url}`]" @click="emit('skip',candidate.url,candidate.lotteryId!,true)">{{ tr('今天跳过','Skip today') }}</button></div></div></details>
+          </li>
+        </ol>
       </section>
     </div>
+    <details class="lifetime-summary"><summary>{{ tr('累计展示统计','Display totals') }}<span>{{ tr('跨运行统计，与本次运行分开','Across runs, separate from this run') }}</span></summary>
+    <section class="metrics-strip" :aria-label="tr('累计展示统计', 'Display totals')">
+      <div>
+        <span>{{ tr('已确认参与', 'Confirmed entries') }}</span
+        ><strong>{{ totals?.participated ?? 0 }}</strong
+        ><small>{{ tr('已收到参与反馈', 'Participation acknowledged') }}</small>
+      </div>
+      <div>
+        <span>{{ tr('实物中奖', 'Physical wins') }}</span
+        ><strong>{{ totals?.physicalWins ?? 0 }}</strong
+        ><small>{{ tr('仅统计本人结果', 'Your results only') }}</small>
+      </div>
+      <div>
+        <span>{{ tr('获得钻石', 'Diamonds won') }}</span
+        ><strong>{{ totals?.diamondWonAmount ?? 0 }}</strong
+        ><small>{{ totals?.diamondWins ?? 0 }} {{ tr('次钻石中奖', 'diamond wins') }}</small>
+      </div>
+      <div>
+        <span>{{ tr('待确认 / 结果未知', 'Unconfirmed / unknown') }}</span
+        ><strong>{{ totals?.submittedUnknown ?? 0 }}<i> / </i>{{ totals?.unknownResults ?? 0 }}</strong
+        ><button class="inline-link" @click="emit('records')">
+          {{ tr('查看运行记录', 'View records') }}
+        </button>
+      </div>
+    </section>
+    </details>
   </div>
 </template>

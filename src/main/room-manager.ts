@@ -1,13 +1,13 @@
 import { Page } from 'playwright'
 import { BrowserManager } from './browser-manager'
 import { FudaiGrabResult,FudaiService } from './fudai-service'
-import { Opportunity,normalizeRoomUrl } from '../shared/policy'
+import { Opportunity,RoomTimeline,normalizeRoomUrl } from '../shared/policy'
 import { PassiveObserver } from './passive-observer'
 import { assertActive,execution,onHalt,repository,policy,paymentReason,reportRisk,sessionEngine,perform } from './runtime'
 import { store } from './store'
 
 export type RoomStatus='loading'|'monitoring'|'grabbing'|'error'|'idle'
-export interface Room {id:string;url:string;name:string;page:Page|null;status:RoomStatus;fudaiCount:number;hasFanBadge:boolean;countdownText:string;remainingSeconds:number|null;drawAt:number|null;fudaiService:FudaiService|null;phase:string}
+export interface Room {id:string;url:string;name:string;page:Page|null;status:RoomStatus;fudaiCount:number;hasFanBadge:boolean;countdownText:string;remainingSeconds:number|null;drawAt:number|null;fudaiService:FudaiService|null;phase:string;timeline?:RoomTimeline}
 export interface RoomMetadata {drawAt?:number|null;remainingSeconds?:number|null;countdownText?:string;opportunity?:Opportunity;observer?:PassiveObserver}
 export class RoomManager {
   private unexpectedClose:()=>void=()=>{}
@@ -17,6 +17,8 @@ export class RoomManager {
   private log:(id:string,message:string)=>void=()=>{}
   private result:(room:Room,result:FudaiGrabResult)=>void=()=>{}
   private removed:(id:string)=>void=()=>{}
+  private reservationTime:()=>number|null=()=>null
+  setReservationTimeProvider(fn:()=>number|null):void{this.reservationTime=fn}
   private continuation:(o:Opportunity|null,room:{url:string;name:string})=>string|null=()=>null
   constructor(private browser:BrowserManager){onHalt(()=>this.closeAllRooms())}
   setCallbacks(update:(room:Room)=>void,log:(id:string,message:string)=>void,result?:(room:Room,result:FudaiGrabResult)=>void,removed?:(id:string)=>void):void{this.update=update;this.log=log;this.result=result||(()=>{});this.removed=removed||(()=>{})}
@@ -34,8 +36,8 @@ export class RoomManager {
       room.page=page||await this.browser.newManagedPage(signal)
       // Install response/WS observers before navigation; takeover retains the verification observer.
       room.fudaiService=new FudaiService(room.page,url,{
-        onUpdate:(o,rounds,phase)=>{if(!this.rooms.has(room.id))return;room.drawAt=o?.drawAt||null;room.fudaiCount=rounds;room.phase=phase;room.status=phase==='完成任务'?'grabbing':'monitoring'},
-        onResult:r=>this.result(room,r),onLog:m=>this.log(room.id,m),mayContinue:o=>this.continuation(o,room),mayWaitForNext:()=>this.continuation(null,room)
+        onUpdate:(o,rounds,phase)=>{if(!this.rooms.has(room.id))return;room.drawAt=o?.drawAt||null;room.fudaiCount=rounds;room.phase=phase;room.status=/核对任务|发送|完成.*任务|提交参与/.test(phase)?'grabbing':'monitoring'},
+        onResult:r=>this.result(room,r),onLog:m=>this.log(room.id,m),mayContinue:o=>this.continuation(o,room),mayWaitForNext:()=>this.continuation(null,room),nextReservationAt:()=>this.reservationTime()
       },{signal,now:Date.now,repository,policy,paymentReason,reportRisk,perform,assertActive,canFinish:t=>sessionEngine.canFinish(t),getConfig:()=>store.store},metadata.observer,!!page)
       room.fudaiService.seed(metadata.opportunity)
       await room.fudaiService.installDomObserver()
@@ -55,6 +57,7 @@ export class RoomManager {
           repository.decision({url:room.url,action:'skip',reason,score:null,probability:null})
         this.log(room.id,reason);await this.removeRoom(room.id);continue
       }
+      room.timeline=room.fudaiService?.getTimeline()
       room.remainingSeconds=room.drawAt?Math.max(0,Math.ceil((room.drawAt-Date.now())/1000)):null
       room.countdownText=room.remainingSeconds===null?'':`${Math.floor(room.remainingSeconds/60)}:${String(room.remainingSeconds%60).padStart(2,'0')}`
       const profile=repository.account().rooms[room.url]

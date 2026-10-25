@@ -82,6 +82,7 @@ function harness() {
   }
   let continuation: Parameters<RoomManager['setContinuationCheck']>[0] = () => null
   const rooms = {
+    setReservationTimeProvider: (_fn:()=>number|null) => {},
     setContinuationCheck: (fn: typeof continuation) => { continuation = fn },
     getAllRooms: () => [] as Room[],
     tick: async () => {},
@@ -670,5 +671,20 @@ test('removing a queued round persists its skip and rejects stale queue commands
   assert.equal(h.repo.isSkipped(candidate.url,candidate.lotteryId),true)
   await h.runner.stop();await h.runner.start();await pulse(h);await pulse(h)
   assert.equal(h.runner.getState().candidateCount,0)
+  await h.runner.stop()
+})
+
+test('measured return allowance preserves the 45-second task target and yields before the next reservation',async()=>{
+  const h=harness(),url='https://live.douyin.com/12345678'
+  h.repo.room(url);h.repo.recordVerificationTiming(url,6)
+  h.discovery.verifyRoom=async()=>verified(h,300)
+  await h.runner.start();await pulse(h);await pulse(h)
+  const c=h.runner.getState().candidates[0]
+  assert.equal(c.drawAt!-c.startAt,65000)
+  assert.equal(c.drawAt!-c.taskAt,45000)
+  h.advance(c.startAt-h.now()-5001)
+  assert.equal(h.continue(null,{url,name:'fixture'}),null)
+  h.advance(1)
+  assert.match(h.continue(null,{url,name:'fixture'})!,/切换时间/)
   await h.runner.stop()
 })

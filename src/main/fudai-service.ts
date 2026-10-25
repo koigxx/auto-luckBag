@@ -1,5 +1,5 @@
 import { Page } from 'playwright'
-import { Opportunity, Policy } from '../shared/policy'
+import { Opportunity, Policy, RoomTimeline, COMMENT_READONLY_REOPEN_SECONDS, RESULT_OBSERVATION_SECONDS, ROOM_HANDOFF_SECONDS } from '../shared/policy'
 import { PassiveObserver } from './passive-observer'
 import { LotteryDom } from './lottery-dom'
 import { parseOwnResult, supplementVisibleTask, visibleFanTaskCompleted } from './lottery-parser'
@@ -35,6 +35,7 @@ export interface FudaiCallbacks {
   onLog: (message: string) => void
   mayContinue: (o: Opportunity) => string | null
   mayWaitForNext?: () => string | null
+  nextReservationAt?: () => number | null
 }
 
 /** One page, one current lottery. The settled IDs and ledger prohibit replaying a round. */
@@ -47,6 +48,8 @@ export class FudaiService {
   private sent = new Set<string>()
   private actionWaits = new Map<string, number>()
   private roundStarted = 0
+  private taskWindowAt: number | null = null
+  private lastDrawAt: number | null = null
   private openedAt: number
   private waitingSince: number
   private lastOpenAt = 0
@@ -151,6 +154,22 @@ export class FudaiService {
       void this.tick()
     })
   }
+  getTimeline(): RoomTimeline | undefined {
+    const now = this.env.now(), o = this.current
+    const reservation = this.callbacks.nextReservationAt?.()
+    const limit = (end: number) => reservation == null ? end : Math.min(end, reservation - ROOM_HANDOFF_SECONDS * 1000)
+    const remaining = (end: number | null) => end === null ? null : Math.max(0, Math.ceil((end-now)/1000))
+    if (o) {
+      const record = this.env.repository.account().rounds[this.env.repository.roundKey(this.url,o.lotteryId)]
+      const drawing = record?.confirmedAt != null || now >= (o.drawAt || Infinity)
+      const endsAt = drawing ? (now < o.drawAt! ? o.drawAt : limit(o.drawAt! + RESULT_OBSERVATION_SECONDS*1000)) : this.roundStarted ? null : this.taskWindowAt
+      return {stage:drawing?'draw':'prepare',startedAt:drawing?(now>=o.drawAt!?o.drawAt!:record!.confirmedAt!):(record?.createdAt??now),endsAt,remainingSeconds:remaining(endsAt),taskAt:this.taskWindowAt,drawAt:o.drawAt,nextUntil:null}
+    }
+    if (!this.rounds) return undefined
+    const nextUntil = limit(this.waitingSince + this.env.policy().nextRoundWaitSeconds*1000)
+    return {stage:'next',startedAt:this.waitingSince,endsAt:nextUntil,remainingSeconds:remaining(nextUntil),taskAt:this.taskWindowAt,drawAt:this.lastDrawAt,nextUntil}
+  }
+  private showPhase(status: string): void { this.callbacks.onUpdate(this.current,this.rounds,status) }
   private async step(): Promise<void> {
     this.env.assertActive(this.signal)
     await this.observer.checkPageRisk()
@@ -162,6 +181,7 @@ export class FudaiService {
       return
     }
     if (this.paymentId) {
+      this.showPhase('等待付款反馈')
       try { await this.settlePayment() }
       catch (error) {
         // A DOM read failure must not merely end this room and let other paid
@@ -187,13 +207,19 @@ export class FudaiService {
       await this.captureResult()
       if (now >= (current.drawAt || now)) {
         this.callbacks.onUpdate(current, this.rounds, '开奖核对')
-        if (now >= (current.drawAt || now) + 25000) {
+        const result = this.env.repository.account().rounds[this.env.repository.roundKey(this.url,current.lotteryId)]
+        if (result?.result === 'won') this.showPhase('核对中奖奖励明细')
+        const nextReservation = this.callbacks.nextReservationAt?.()
+        const yieldReason = nextReservation != null && nextReservation <= now + ROOM_HANDOFF_SECONDS*1000
+          ? this.callbacks.mayWaitForNext?.() : null
+        if (result?.result === 'lost' || yieldReason || now >= (current.drawAt || now) + RESULT_OBSERVATION_SECONDS*1000) {
           const old =
             this.env.repository.account().rounds[this.env.repository.roundKey(this.url, current.lotteryId)]
           if (old?.result === 'pending')
             this.env.repository.record(this.url, current.lotteryId, { result: 'unknown' })
           this.settled.add(current.lotteryId)
           this.rounds++
+          this.lastDrawAt = current.drawAt
           this.current = null
           this.callbacks.onUpdate(null, this.rounds, '等待下一轮福袋')
           this.waitingSince = now
@@ -202,6 +228,7 @@ export class FudaiService {
           this.callbacks.onLog(
             `第 ${this.rounds} 轮已收尾；${old?.result === 'won' ? '中奖已确认' : old?.result === 'lost' ? '未中奖' : `未获得明确结果（${this.resultReadReason}）`}`
           )
+          if (yieldReason) this.doneReason = yieldReason
           if (this.rounds >= p.maxRounds || this.env.repository.account().session.phase !== 'running')
             this.doneReason = '已达到连续参与上限或进入收尾'
         }
@@ -223,6 +250,7 @@ export class FudaiService {
       }
       const records = Object.values(this.env.repository.account().rounds).filter(r => r.roomUrl === this.url)
       const preparation = Math.max(this.env.getConfig().enterBeforeSeconds, taskLead(this.current!, p, records, true))
+      if (!this.roundStarted) this.taskWindowAt = (current.drawAt || 0) - preparation*1000
       if (!this.sent.size && now < (current.drawAt || 0) - preparation * 1000) {
         this.callbacks.onUpdate(this.current, this.rounds, '等待任务准备窗口')
         return
@@ -330,6 +358,7 @@ export class FudaiService {
       this.followStarted = attempts.follow.at
     }
     this.roundStarted = 0
+    this.taskWindowAt = (o.drawAt || now) - Math.max(this.env.getConfig().enterBeforeSeconds,taskLead(o,p,records,true))*1000
     this.watchUntil = now + (o.watchSeconds || 0) * 1000
     this.env.repository.record(this.url, o.lotteryId, { drawAt: o.drawAt })
     this.callbacks.onLog('弹窗身份与任务校验通过，将在任务准备窗口执行；提交后仍需确认参与结果')
@@ -338,7 +367,7 @@ export class FudaiService {
   }
   private async tasks(o: Opportunity): Promise<void> {
     if (!this.roundStarted) this.roundStarted = this.env.now()
-    this.callbacks.onUpdate(o, this.rounds, '完成任务')
+    this.showPhase('核对任务条件')
     if (o.requiresShare || o.unsupported.length) {
       this.doneReason = '任务条件发生变化，停止本轮'
       return
@@ -348,15 +377,20 @@ export class FudaiService {
     // A one-click comment may close the task modal. Reopen only to read the
     // outcome, never to execute another task or replay the submitted comment.
     if (this.sent.has('confirmation-reopen')) {
+      this.showPhase('只读核对参与结果')
       this.waitForAction('confirmation-read', '重新查看后仍未确认本人参与，停止本轮且不重发任务')
       return
     }
     if (!text) {
+      this.showPhase(this.sent.has('comment') ? '等待弹窗稳定，只读确认参与' : '等待任务弹窗')
       if (!this.actionWaits.has('task-panel'))
         this.callbacks.onLog(`本轮弹窗读取诊断：${await this.dom.panelDiagnostics()}；${this.observer.identityDiagnostics()}`)
       const missingSince = this.actionWaits.get('task-panel')
-      if (this.sent.has('comment') && missingSince !== undefined && this.env.now() - missingSince >= 10000) {
+      if (this.sent.has('comment') && missingSince !== undefined && this.env.now() - missingSince >= COMMENT_READONLY_REOPEN_SECONDS*1000 && await this.dom.panelIsClosed()) {
+        this.env.assertActive(this.signal)
+        if (this.stopped || this.observer.latest?.lotteryId !== o.lotteryId || this.observer.panelLotteryId !== o.lotteryId) return
         this.sent.add('confirmation-reopen')
+        this.showPhase('只读核对参与结果')
         if (await this.dom.open()) {
           this.callbacks.onLog('评论后弹窗已关闭，仅重新查看一次本人参与确认，不再执行任何任务')
           this.actionWaits.set('confirmation-read', this.env.now())
@@ -381,6 +415,7 @@ export class FudaiService {
         return
       }
       if (await this.dom.hasCommentAction()) {
+        this.showPhase('发送一键评论')
         this.sent.add('comment')
         this.sentCommand = o.commentText
         if (!(await this.dom.comment(o.commentText, () => {
@@ -413,11 +448,13 @@ export class FudaiService {
       this.sent.has('comment') &&
       this.observer.lastChatSuccess < this.commentStarted
     ) {
+      this.showPhase('等待评论反馈')
       if (this.env.now() - this.commentStarted > 10000)
         this.doneReason = '评论未获得业务成功反馈，停止本轮以防重复发送'
       return
     }
     if (o.membership === 'needs-payment' && !this.sent.has('payment')) {
+      this.showPhase('完成粉丝团任务')
       const cost = o.cost
       if (cost === null) {
         this.waitForAction('payment-price', '粉丝团金额未确认')
@@ -478,6 +515,7 @@ export class FudaiService {
       return
     }
     if (o.membership === 'needs-payment' && this.sent.has('payment')) {
+      this.showPhase('等待粉丝团资格确认')
       this.waitForAction('fan-qualification', '付款已确认，但本轮粉丝团资格尚未确认，停止提交且不重复付款')
       return
     }
@@ -486,8 +524,9 @@ export class FudaiService {
       await this.completeFollow()
       return
     }
-    if (o.watchSeconds && this.env.now() < this.watchUntil) return
+    if (o.watchSeconds && this.env.now() < this.watchUntil) { this.showPhase('等待看播条件完成'); return }
     if (this.sent.has('submit')) return
+    this.showPhase('提交参与')
     this.sent.add('submit')
     if (!(await this.dom.action(/^(?:手动参与|立即参与|参与福袋|参与抽奖|一键参与|立即抽奖|免费参与|抢福袋|报名)$/, true, () => {
       this.env.repository.record(this.url, o.lotteryId, { submittedAt: this.env.now() })
@@ -499,6 +538,7 @@ export class FudaiService {
     } else this.actionWaits.delete('submit')
   }
   private async completeFollow(): Promise<void> {
+    this.showPhase(this.sent.has('follow')?'等待关注反馈':'完成关注任务')
     if (!this.sent.has('follow')) {
       this.sent.add('follow')
       if (!(await this.dom.action(/^(?:关注|去关注|关注主播|关注参与|关注并参与|立即关注)$/, true, () => {
