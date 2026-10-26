@@ -111,7 +111,7 @@ export function setupIpcHandlers(win:BrowserWindow,_browser:BrowserManager,auth:
   ipcMain.handle('insights:resolveRisk',safe(async(id:string)=>{
     const risk=reviewRisk(id),account=repository.read().activeAccount!
     if(risk.source!=='payment'){
-      await _browser.checkManualReview(account)
+      await _browser.checkManualReview(account,risk.url?normalizeRoomUrl(risk.url):'https://live.douyin.com')
       if(!await auth.restoreSession(true) || repository.read().activeAccount!==account)
         throw new Error('登录或账号状态尚未确认，待办保持未完成')
       await _browser.checkManualReview(account)

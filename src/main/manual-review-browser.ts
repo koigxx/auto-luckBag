@@ -30,7 +30,14 @@ export class ManualReviewBrowser {
     })().finally(()=>{this.openingManual=null})
     return this.openingManual
   }
-  async checkManualReview(account: string): Promise<void> {
+  async checkManualReview(account: string, reopenUrl?: string): Promise<void> {
+    if (this.manualAccount && this.manualAccount !== account)
+      throw new Error('账号已变化，请重新前往浏览器处理，并保持处理页面打开')
+    if ((!this.manualPage || this.manualPage.isClosed()) && reopenUrl) {
+      await this.openManualReview(reopenUrl, account)
+      // A new page is not evidence that the user completed the old challenge.
+      throw new Error('处理页面已重新打开。请在浏览器中确认验证已完成，保持页面打开，再点击“已处理，检查并完成”；当前待办仍保留。')
+    }
     if (!this.manualPage || this.manualPage.isClosed() || this.manualAccount!==account)
       throw new Error('请先前往浏览器处理，并保持处理页面打开')
     const url=new URL(this.manualPage.url())

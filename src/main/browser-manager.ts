@@ -16,7 +16,7 @@ export class BrowserManager {
   private pages = new Set<Page>()
   private manualReview = new ManualReviewBrowser(()=>this.getContext())
   openManualReview(url:string,account:string):Promise<void>{return this.manualReview.openManualReview(url,account)}
-  checkManualReview(account:string):Promise<void>{return this.manualReview.checkManualReview(account)}
+  checkManualReview(account:string,reopenUrl?:string):Promise<void>{return this.manualReview.checkManualReview(account,reopenUrl)}
   closeManualReview():Promise<void>{return this.manualReview.closeManualReview()}
   constructor() { onHalt(() => this.closeManagedPages()) }
   setStorageStatePath(path: string): void { this.storageStatePath = path }

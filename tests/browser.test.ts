@@ -77,6 +77,13 @@ test('manual review reuses the task context, never enters values, and checks vis
     await review.checkManualReview('a')
     await review.closeManualReview()
     await assert.rejects(review.checkManualReview('a'),/先前往/)
+      await assert.rejects(review.checkManualReview('a',url),/处理页面已重新打开/)
+      assert.equal(p.context().pages().length,2)
+      await assert.rejects(review.checkManualReview('a',url),/仍显示/)
+      assert.equal(p.context().pages().length,2,'checking an existing challenge must not create more pages')
+      await p.context().pages()[1].close()
+      await assert.rejects(review.checkManualReview('a',url),/处理页面已重新打开/)
+      await assert.rejects(review.checkManualReview('b',url),/账号已变化/)
     assert.equal(p.isClosed(),false)
   }finally{await p.context().close()}
 })
