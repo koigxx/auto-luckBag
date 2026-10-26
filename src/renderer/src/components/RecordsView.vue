@@ -74,6 +74,22 @@ const unresolved = computed(
   () => props.data?.payments.filter((payment) => payment.state === 'unresolved') || []
 )
 const risks = computed(() => props.data?.risks.filter((risk) => risk.resolvedAt === null) || [])
+const riskFeedback = ref<Record<string,string>>({})
+async function riskAction(id: string, complete: boolean) {
+  riskFeedback.value[id] = complete ? tr('正在检查页面验证、登录和账号，请稍候…','Checking page, login and account…') : tr('正在打开处理页面…','Opening review page…')
+  await props.onAction(`risk-${complete?'done':'open'}:${id}`, async () => {
+    try {
+      const result = await (complete ? api.insights.resolveRisk(id) : api.insights.openRisk(id))
+      riskFeedback.value[id] = result.success
+        ? (complete ? tr('检查通过，待办已完成；不会自动启动。','Check passed. Automation remains stopped.') : tr('请在浏览器中处理并保持页面打开，再点击检查并完成。','Resolve in the browser, keep it open, then check and complete.'))
+        : result.error || tr('检查未通过，待办保留。','Check failed; issue remains open.')
+      return result
+    } catch (error) {
+      riskFeedback.value[id] = error instanceof Error ? error.message : tr('检查失败，请重试。','Check failed. Try again.')
+      throw error
+    }
+  })
+}
 watch(tab,()=>{resultFilter.value='';cycleFilter.value='';if(tab.value==='decisions')runFilter.value=''})
 const rows = computed(
   () =>
@@ -212,10 +228,13 @@ async function confirm() {
           <div>
             <strong>{{ risk.reason }}</strong>
             <p>{{ time(risk.at) }} · {{ tr('自动运行已停止，等待人工处理', 'Automation stopped; manual handling required') }}</p>
+            <p v-if="riskFeedback[riskId(risk)]" role="status">{{ riskFeedback[riskId(risk)] }}</p>
+            <p v-else>{{ tr('先前往浏览器完成验证并保持页面打开，再检查；未通过时会在此显示原因。','Open the browser, complete verification and keep it open, then check. Errors appear here.') }}</p>
+            <p v-if="running">{{ tr('请等待自动任务停止后再处理。','Wait for automation to stop.') }}</p>
           </div>
           <div class="button-row">
-            <button class="button small" :disabled="running || busy[`risk-open:${riskId(risk)}`]" @click="onAction(`risk-open:${riskId(risk)}`,()=>api.insights.openRisk(riskId(risk)))">{{ tr('前往浏览器处理','Open browser to resolve') }}</button>
-            <button class="button small" :disabled="running || !!unresolved.length || busy[`risk-done:${riskId(risk)}`]" @click="onAction(`risk-done:${riskId(risk)}`,()=>api.insights.resolveRisk(riskId(risk)))">{{ tr('已处理，检查并完成','Check and complete') }}</button>
+            <button class="button small" :disabled="running || busy[`risk-open:${riskId(risk)}`] || busy[`risk-done:${riskId(risk)}`]" @click="riskAction(riskId(risk),false)">{{ tr('前往浏览器处理','Open browser to resolve') }}</button>
+            <button class="button small" :disabled="running || !!unresolved.length || busy[`risk-done:${riskId(risk)}`] || busy[`risk-open:${riskId(risk)}`]" @click="riskAction(riskId(risk),true)">{{ busy[`risk-done:${riskId(risk)}`] ? tr('正在检查…','Checking…') : tr('已处理，检查并完成','Check and complete') }}</button>
           </div>
         </div>
         <div v-if="risks.length" class="review-footer">

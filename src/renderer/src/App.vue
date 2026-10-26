@@ -352,7 +352,7 @@ async function recordAction(
         </footer>
       </main>
     </div>
-    <aside v-if="alerts.length" class="alert-toast" role="status" aria-live="polite">
+    <aside v-if="alerts.length && !(view === 'records' && alerts[0].kind === 'risk')" class="alert-toast" role="status" aria-live="polite">
       <div class="section-heading"><small>{{ tr('福袋助手', 'Lucky Bag') }} · {{ alerts.length }} {{ tr('条提醒','notifications') }}</small><button class="icon-button" aria-label="稍后查看提醒" @click="dismissAlert(alerts[0].id)"><UiIcon name="close" :size="16" /></button></div>
       <strong>{{ alerts[0].title }}</strong><p>{{ alerts[0].message }}</p>
       <button class="button small" @click="view=alerts[0].kind==='login'?'dashboard':'records';dismissAlert(alerts[0].id)">{{ alerts[0].kind==='login'?tr('返回登录','Sign in'):alerts[0].kind==='risk'?tr('查看异常待办','View issue'):tr('查看记录','View records') }}</button>

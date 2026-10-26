@@ -11,7 +11,7 @@ import type { AppConfig } from '../shared/config'
 import type { ExecutionGate } from './execution-gate'
 import type { RuntimeRepository } from './runtime-repository'
 import type { SessionEngine } from './session-engine'
-import { navigationQuotaReadyAt, navigationSpacingReadyAt } from './execution-gate'
+import { ExecutionUnavailableError, navigationQuotaReadyAt, navigationSpacingReadyAt } from './execution-gate'
 
 export interface AutoRunnerEnvironment {
   execution: ExecutionGate
@@ -235,6 +235,11 @@ export class AutoRunner {
     const before = this.env.repository.account().session.phase
     const s = this.env.sessionEngine.tick(this.rooms.getAllRooms().length > 0)
     if (!['running', 'draining'].includes(s.phase)) {
+      // Risk reporting can abort execution before this pulse. Always clear queues.
+      this.pool = []
+      this.pending = []
+      this.waitingReason = ''
+      this.retryAt = 0
       if (!this.env.execution.signal.aborted) {
         this.pool = []
         this.pending = []
@@ -264,6 +269,7 @@ export class AutoRunner {
         }
       }
       if (['blocked', 'stopped'].includes(this.env.repository.account().session.phase)) {
+        if (this.automatic) this.log(`运行已停止：${this.env.repository.account().session.reason || '计划结束'}`)
         await this.env.haltPages()
         await this.discovery.close()
         await this.rooms.closeAllRooms()
@@ -290,6 +296,11 @@ export class AutoRunner {
         const signal = this.env.execution.signal
         void this.cycle()
           .catch((e) => {
+            if (e instanceof ExecutionUnavailableError) {
+              this.retryAt = 0
+              this.waitingReason = ''
+              return
+            }
             if (!signal.aborted) {
               this.log(`本轮调度：${e.message}`)
               this.retryAt = this.env.now() + this.env.store.get('scanIntervalSeconds') * 1000

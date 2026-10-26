@@ -3,7 +3,7 @@ import fs from 'fs'
 import { RuntimeData, validatePolicy } from '../shared/policy'
 import { RuntimeRepository, emptyRuntime, allowedNow, dayKey } from './runtime-repository'
 import { SessionEngine } from './session-engine'
-import { ExecutionGate, checkSignal, delay, navigationQuotaReadyAt, navigationSpacingReadyAt, isDiscoveryUrl } from './execution-gate'
+import { ExecutionGate, ExecutionUnavailableError, checkSignal, delay, navigationQuotaReadyAt, navigationSpacingReadyAt, isDiscoveryUrl } from './execution-gate'
 import { store } from './store'
 import { defaults } from '../shared/config'
 import { validateConfigPatch } from '../shared/config-validation'
@@ -60,7 +60,7 @@ export function reportRisk(reason: string, source: string, url?: string): void {
 }
 export function assertActive(signal: AbortSignal, newWork = false): void {
   checkSignal(signal)
-  if (execution.signal !== signal) throw new Error('旧运行批次已取消')
+  if (execution.signal !== signal) throw new ExecutionUnavailableError('旧运行批次已取消')
   const a = repository.account(),
     s = a.session,
     now = Date.now()
@@ -73,7 +73,7 @@ export function assertActive(signal: AbortSignal, newWork = false): void {
     (a.session.activeByDay[dayKey(now, s.policy.timezone)] || 0) >= s.policy.dailyMinutes * 60_000 ||
     (newWork && (s.phase !== 'running' || now >= (s.drainAt || 0)))
   )
-    throw new Error('当前运行状态不允许此操作')
+    throw new ExecutionUnavailableError()
 }
 export async function perform<T>(
   signal: AbortSignal,

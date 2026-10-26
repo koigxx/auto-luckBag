@@ -38,6 +38,9 @@ export function navigationQuotaReadyAt(
   )
 }
 
+export class ExecutionUnavailableError extends Error {
+  constructor(message = '当前运行状态不允许此操作') { super(message); this.name = 'ExecutionUnavailableError' }
+}
 export function abortError(): Error {
   return new Error('操作已取消')
 }
