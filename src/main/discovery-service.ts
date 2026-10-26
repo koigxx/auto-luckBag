@@ -5,7 +5,7 @@ import { Opportunity, normalizeRoomUrl, SOURCE_TO_FIRST_ROOM_SECONDS, VERIFICATI
 import { PassiveObserver } from './passive-observer'
 import { LotteryDom, visibleOpportunity } from './lottery-dom'
 import { execution, repository, assertActive, onHalt, perform, reportRisk } from './runtime'
-import { delay } from './execution-gate'
+import { delay, ExecutionUnavailableError } from './execution-gate'
 import { supplementVisibleTask } from './lottery-parser'
 
 export interface DiscoveryOptions {
@@ -223,6 +223,9 @@ export class DiscoveryService {
         observer: keep ? observer : undefined
       }
     } catch (error) {
+      // Plan boundaries and explicit cancellation say nothing about room quality.
+      // Still run finally, but do not add failure cooldowns or error decisions.
+      if (signal.aborted || error instanceof ExecutionUnavailableError) throw error
       await observer.checkPageRisk()
       if (!signal.aborted) {
         if (navigated) repository.visit(url, false)
