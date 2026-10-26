@@ -1,4 +1,4 @@
-import { roomDisplayName, discoveryRoomName } from '../shared/record-presentation'
+import { roomDisplayName, discoveryRoomName, usableRoomName } from '../shared/record-presentation'
 import { Page, Response } from 'playwright'
 import { BrowserManager } from './browser-manager'
 import { Opportunity, normalizeRoomUrl, SOURCE_TO_FIRST_ROOM_SECONDS, VERIFICATION_MAX_SECONDS, RETURN_VERIFICATION_MAX_SECONDS } from '../shared/policy'
@@ -75,7 +75,7 @@ export class DiscoveryService {
       try {
         const normalized = normalizeRoomUrl(url),
           old = rooms.get(normalized),
-          label = discoveryRoomName(name)
+          label = usableRoomName(discoveryRoomName(name))
         rooms.set(normalized, {
           url: normalized,
           name: label && label !== '直播中' ? label : old?.name || normalized,
@@ -128,6 +128,13 @@ export class DiscoveryService {
     this.firstVerificationAt = 0
     const profile = repository.room(url, room.name),
       fresh = profile.visits.length === 0
+    // Only discovery-owned names have a card envelope; preserve user-entered names.
+    const savedName = usableRoomName(profile.source === 'discovery' ? discoveryRoomName(profile.name) : profile.name)
+    const preferredName = savedName || usableRoomName(room.name)
+    if (preferredName) {
+      room = { ...room, name: preferredName }
+      if (profile.name !== preferredName) repository.updateRoom(url, { name: preferredName })
+    }
     const page = await this.browser.newManagedPage(signal)
     this.pages.add(page)
     const observer = new PassiveObserver(page, signal, reportRisk, (o) => repository.observe(url, o)),
@@ -138,11 +145,10 @@ export class DiscoveryService {
     try {
       await this.browser.navigate(page, url, fresh, signal)
       navigated = true
-      const title = (await page.title().catch(() => '')).trim().slice(0, 80)
+      const title = usableRoomName(await page.title().catch(() => '')).slice(0, 80)
       if (
         title &&
-        title !== '抖音直播' &&
-        (!profile.name || profile.name === url || profile.name === '直播中')
+        !preferredName
       ) {
         room = { ...room, name: title }
         repository.updateRoom(url, { name: title })

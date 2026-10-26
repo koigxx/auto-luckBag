@@ -232,3 +232,13 @@ test('extension keeps legacy ceilings and rejects more than 24 hours without mut
   r.change(a=>{a.session.phase='resume-check'})
   assert.throws(()=>e.extend(1,before.stopAt!),/不能延长/)
 })
+
+test('room names reject generic page titles, strip site suffix and support capped viewers',()=>{
+  const url='https://live.douyin.com/12345678'
+  assert.equal(discoveryRoomName('标题 @主播2026 10万+'),'主播2026')
+  assert.equal(discoveryRoomName('标题 @主播 10万＋'),'主播')
+  assert.equal(roomDisplayName('你的关注 标题 @主播 10万+',url),'主播')
+  assert.equal(roomDisplayName('抖音直播电脑版_抖音直播网页版入口_抖音直播',url),'直播间 12345678')
+  assert.equal(roomDisplayName('主播的抖音直播间 - 抖音直播',url),'主播的抖音直播间')
+  assert.equal(roomDisplayName('主播 @朋友 123',url),'主播 @朋友 123')
+})

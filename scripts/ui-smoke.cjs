@@ -350,6 +350,8 @@ module.exports = async function verifyUI(config, output) {
           },
           openRisk: async () => {count('openRisk');return {success:true}},
           resolveRisk: async () => {
+            count('resolveRisk')
+            if(fixture.riskError)return {success:false,error:fixture.riskError}
             fixture.insights.risks.forEach((r) => {
               r.resolvedAt = now
             })
@@ -621,6 +623,22 @@ module.exports = async function verifyUI(config, output) {
     )
     await page.getByRole('button',{name:'前往浏览器处理',exact:true}).click()
     check((await page.evaluate(()=>window.__fixture.calls.openRisk))===1,'issue todo exposes the manual browser action')
+    await page.evaluate(()=>{
+      const f=window.__fixture
+      f.insights.payments[0].state='failed'
+      f.riskError='页面仍显示验证或异常，请完成后再检查'
+      f.emit('alerts:update',[{id:'risk-ui',kind:'risk',title:'异常待办需要处理',message:'fixture',at:Date.now(),dismissedAt:null}])
+    })
+    await nav('运行面板').click()
+    await nav('运行记录').click()
+    check(await page.locator('.alert-toast').count()===0,'risk notification never overlays issue actions on records page')
+    await page.getByRole('button',{name:'已处理，检查并完成',exact:true}).click()
+    check(await page.locator('.review-row [role="status"]').getByText('页面仍显示验证或异常，请完成后再检查',{exact:true}).isVisible(),'failed review displays actionable feedback next to issue')
+    check((await page.evaluate(()=>window.__fixture.insights.risks[0].resolvedAt))===null,'failed review keeps risk unresolved')
+    check((await page.evaluate(()=>window.__fixture.calls.resolveRisk))===1,'completion button dispatches exactly once without forcing click')
+    await page.evaluate(()=>{window.__fixture.insights.payments[0].state='unresolved';delete window.__fixture.riskError})
+    await nav('运行面板').click()
+    await nav('运行记录').click()
     await page.getByRole('button', { name: '核实未扣款', exact: true }).click()
     check(await page.getByRole('dialog').isVisible(), 'reconciliation requires an explicit review dialog')
     await page.getByRole('dialog').getByRole('button', { name: '取消', exact: true }).click()

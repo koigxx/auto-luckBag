@@ -702,3 +702,28 @@ test('extending an automatic run updates state without restarting execution and 
   await h.runner.stop()
   assert.throws(()=>h.runner.extend(30,state.stopAt!),/没有可延长/)
 })
+import { ExecutionUnavailableError } from '../src/main/execution-gate'
+test('risk abort before pulse clears pending discovery and never resumes work', async () => {
+  const h=harness()
+  h.discovery.scan=async()=>({rooms:Array.from({length:3},(_,i)=>({url:`https://live.douyin.com/${12345678+i}`,name:'fixture',reason:'fixture',countdownText:'',remainingSeconds:null})),riskDetected:false,riskReason:''})
+  await h.runner.start();await h.runner.pulse();await flush()
+  assert.ok(h.runner.getState().pendingVerifyCount>0)
+  h.repo.risk('请完成下列验证','visible-challenge')
+  h.env.execution.stop()
+  await h.runner.pulse()
+  assert.equal(h.runner.getState().pendingVerifyCount,0)
+  assert.equal(h.runner.getState().candidateCount,0)
+  assert.equal(h.runner.getState().waitingReason,'')
+  assert.equal(h.runner.getState().status,'blocked')
+  assert.equal(h.runner.getState().session.nextResumeAt,null)
+  assert.equal(h.repo.account().risks[0].resolvedAt,null)
+})
+test('expected execution boundary is not a retry error but actual failures remain visible', async()=>{
+  for(const expected of [true,false]) {
+    const h=harness()
+    h.discovery.scan=async()=>{throw expected?new ExecutionUnavailableError():new Error('fixture failure')}
+    await h.runner.start();await h.runner.pulse();await flush()
+    assert.equal(h.logs.some(x=>x.includes('本轮调度：')), !expected)
+    assert.equal(h.runner.getState().waitingReason.includes('异常'),!expected)
+  }
+})

@@ -21,14 +21,21 @@ export function recordTotals(rounds: RoundRecord[], payments: Payment[]) {
 // Called only for discovery anchor text, whose card layout includes title/host/viewers.
 export function discoveryRoomName(text: string): string {
   const clean=text.replace(/\s+/g,' ').trim()
-  const card=clean.match(/^.+?\s+@\s*(.+?)\s+\d+(?:\.\d+)?[万亿]?$/u)
+  const card=clean.match(/^.+?\s+@\s*(.+?)\s+\d+(?:\.\d+)?[万亿]?[+＋]?$/u)
   return (card?.[1]?.trim() || clean).slice(0,80)
 }
 
+export function usableRoomName(name: string | undefined): string {
+  const clean=(name || '').replace(/\s+/g,' ').trim().replace(/\s+-\s+抖音直播$/, '')
+  if (!clean || ['直播中','直播间','点击进入直播间','进入直播间','点击进入','抖音直播'].includes(clean) ||
+      /^https?:\/\//i.test(clean) || /^抖音直播电脑版[_｜|].*抖音直播网页版入口/.test(clean)) return ''
+  return clean
+}
+
 export function roomDisplayName(name: string | undefined, url: string, english = false): string {
-  let clean = name?.replace(/\s+/g, ' ').trim()
+  let clean = usableRoomName(name)
   // Only strip the known discovery-card envelope, not arbitrary @ or digits in nicknames.
-  const card = clean?.match(/^你的关注\s+.+?\s+@\s*(.+?)\s+\d+(?:\.\d+)?[万亿]?$/u)
+  const card = clean?.match(/^你的关注\s+.+?\s+@\s*(.+?)\s+\d+(?:\.\d+)?[万亿]?[+＋]?$/u)
   if (card) clean = card[1].trim()
   if (clean && !['直播中', '直播间', '点击进入直播间', '进入直播间', '点击进入'].includes(clean) && !/^https?:\/\//i.test(clean)) return clean
   if (!url) return english ? 'System' : '系统'
