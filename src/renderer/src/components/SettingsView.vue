@@ -43,7 +43,7 @@ const editable = (c: AppConfig) =>
     | 'policy'
   >
 const draft = ref(editable(props.config))
-function applyPreset(preset:ParticipationPreset){if(props.running||props.saving)return;Object.assign(draft.value,participationPreset(draft.value,preset));saved.value=false}
+function applyPreset(preset:ParticipationPreset){if(props.running||props.saving||preset==='physical')return;Object.assign(draft.value,participationPreset(draft.value,preset));saved.value=false}
 const baseline = ref(JSON.stringify(draft.value))
 const dirty = computed(() => JSON.stringify(draft.value) !== baseline.value)
 const section = ref('preferences')
@@ -209,7 +209,7 @@ const objectives = [
     icon: 'rooms',
     zh: '实物偏好',
     en: 'Physical prizes',
-    detail: ['优先选择已确认的实物福袋', 'Choose confirmed physical-prize bags']
+    detail: ['暂不可用：电脑端暂不支持超级福袋', 'Unavailable: Super Lucky Bags are not supported on desktop']
   }
 ]
 watch(
@@ -233,6 +233,7 @@ function restore() {
   saved.value = false
 }
 function selectType(type: 'all' | 'physical' | 'diamond', value: boolean) {
+  if (type === 'physical') return
   draft.value.fudaiTypes[type] = value
   if (type === 'all' && value) {
     draft.value.fudaiTypes.physical = false
@@ -248,6 +249,8 @@ async function invalid(group: string, message: string, id?: string) {
 async function save() {
   if (props.running || props.saving || !dirty.value) return
   error.value = ''
+  if (draft.value.fudaiTypes.physical || draft.value.policy.objective === 'physical')
+    return invalid('preferences', tr('实物相关选项暂不可用，请选择“钻石优先”或“全部均衡”方案后保存。', 'Physical options are unavailable. Choose Diamonds or Balanced before saving.'))
   if (!Object.values(draft.value.fudaiTypes).some(Boolean))
     return invalid('preferences', tr('至少选择一种福袋类型。', 'Select at least one prize type.'))
   for (const f of fields) {
@@ -354,7 +357,9 @@ async function save() {
       <fieldset :disabled="running || saving">
         <section v-show="section === 'preferences'" class="settings-section">
           <h3>{{tr('快捷方案','Quick presets')}}</h3>
-          <div class="preset-options"><button v-for="item in [{id:'existing',label:'仅已有资格'},{id:'physical',label:'实物优先'},{id:'diamond',label:'钻石优先'},{id:'balanced',label:'全部均衡'}]" :key="item.id" type="button" class="button small" @click="applyPreset(item.id as ParticipationPreset)">{{item.label}}</button></div>
+          <div class="preset-options"><button v-for="item in [{id:'existing',label:'仅已有资格'},{id:'physical',label:'实物优先（暂不可用）'},{id:'diamond',label:'钻石优先'},{id:'balanced',label:'全部均衡'}]" :key="item.id" type="button" class="button small" :disabled="item.id === 'physical'" @click="applyPreset(item.id as ParticipationPreset)">{{item.label}}</button></div>
+          <p class="inline-notice">{{tr('电脑端暂不支持超级福袋，实物相关选项暂不可选。“全部类型”仅表示当前已支持类型，不代表支持超级福袋。','Super Lucky Bags are not supported on desktop. Physical options are disabled; All types includes supported types only.')}}</p>
+          <p v-if="draft.fudaiTypes.physical || draft.policy.objective === 'physical'" class="inline-notice error">{{tr('旧配置包含实物偏好，请选择“钻石优先”或“全部均衡”后保存。','Your saved configuration includes physical prizes. Choose Diamonds or Balanced and save.')}}</p>
           <p class="microcopy">{{tr('方案仅调整参与偏好，保留现有预算、付费限制和运行节奏。检查后保存生效。','Presets change preferences only. Spending limits and pacing stay as configured. Review and save to apply.')}}</p>
           <h2>{{ tr('先选你更关注的机会', 'Choose what matters to you') }}</h2>
           <p class="section-description">
@@ -370,12 +375,13 @@ async function save() {
               v-for="item in objectives"
               :key="item.value"
               class="choice-tile"
-              :class="{ selected: draft.policy.objective === item.value }"
+              :class="{ selected: draft.policy.objective === item.value, unavailable: item.value === 'physical' }"
               ><input
                 v-model="draft.policy.objective"
                 type="radio"
                 name="objective"
                 :value="item.value"
+                :disabled="item.value === 'physical'"
               /><UiIcon :name="item.icon" :size="23" /><strong>{{ tr(item.zh, item.en) }}</strong
               ><span>{{ tr(item.detail[0], item.detail[1]) }}</span></label
             >
@@ -385,8 +391,8 @@ async function save() {
           <p class="section-description">
             {{
               tr(
-                '实物和钻石可同时选择；全部还包含优惠券等已支持类型。',
-                'Physical and diamond prizes can be combined. All also includes other supported types.'
+                '可选择钻石或全部已支持类型；实物相关选项暂不可用。',
+                'Choose diamonds or all supported types. Physical options are currently unavailable.'
               )
             }}
           </p>
@@ -398,9 +404,10 @@ async function save() {
                 { key: 'diamond', zh: '钻石福袋', en: 'Diamonds' }
               ]"
               :key="item.key"
-              :class="{ selected: draft.fudaiTypes[item.key as 'all' | 'physical' | 'diamond'] }"
+              :class="{ selected: draft.fudaiTypes[item.key as 'all' | 'physical' | 'diamond'], unavailable: item.key === 'physical' }"
               ><input
                 type="checkbox"
+                :disabled="item.key === 'physical'"
                 :checked="draft.fudaiTypes[item.key as 'all' | 'physical' | 'diamond']"
                 @change="
                   selectType(
