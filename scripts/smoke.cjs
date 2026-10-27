@@ -61,7 +61,7 @@ async function main() {
       .getByRole('button', { name: '策略设置', exact: true })
       .click()
     // Exercise the actual Vue draft and contextBridge, not just plain IPC arguments.
-    await page.getByLabel('实物福袋', { exact: true }).check()
+    assert.equal(await page.getByLabel('实物福袋', { exact: true }).isDisabled(), true)
     await page.getByLabel('钻石福袋', { exact: true }).check()
     await page.getByRole('button', { name: '支出与粉丝团', exact: true }).click()
     await page.getByLabel('总钻石预算', { exact: true }).fill('50')
@@ -81,7 +81,7 @@ async function main() {
       assert.equal(value.diamondBudget, 50)
       assert.equal(value.policy.dailySpend, 50)
       assert.equal(value.policy.anchorSpend, 5)
-      assert.deepEqual(value.fudaiTypes, { all: false, physical: true, diamond: true })
+      assert.deepEqual(value.fudaiTypes, { all: false, physical: false, diamond: true })
       assert.equal(value.diamondUsed, 7)
     }
     await page.reload()
@@ -90,7 +90,8 @@ async function main() {
       .getByRole('button', { name: '策略设置', exact: true })
       .click()
     assert.equal(await page.getByLabel('全部类型', { exact: true }).isChecked(), false)
-    assert.equal(await page.getByLabel('实物福袋', { exact: true }).isChecked(), true)
+    assert.equal(await page.getByLabel('实物福袋', { exact: true }).isChecked(), false)
+    assert.equal(await page.getByLabel('实物福袋', { exact: true }).isDisabled(), true)
     assert.equal(await page.getByLabel('钻石福袋', { exact: true }).isChecked(), true)
     await page.getByRole('button', { name: '支出与粉丝团', exact: true }).click()
     assert.equal(await page.getByLabel('总钻石预算', { exact: true }).inputValue(), '50')

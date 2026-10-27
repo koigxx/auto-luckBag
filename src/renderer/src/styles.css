@@ -983,6 +983,13 @@ svg {
   background: #fff8fa;
   color: #ad4662;
 }
+.choice-tile.unavailable,
+.type-options label.unavailable {
+  opacity: 0.55;
+  cursor: not-allowed;
+  background: #f3f4f6;
+  border-color: #dce0e6;
+}
 .quiet-note {
   display: flex;
   align-items: flex-start;

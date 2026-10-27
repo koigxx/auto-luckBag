@@ -707,11 +707,15 @@ module.exports = async function verifyUI(config, output) {
     await nav('策略设置').click()
     await page.getByRole('button',{name:'参与偏好',exact:true}).click()
     const budgetBefore=await page.evaluate(()=>window.__fixture.config.diamondBudget)
-    await page.getByRole('button',{name:'实物优先',exact:true}).click()
+    check(await page.getByRole('button',{name:'实物优先（暂不可用）',exact:true}).isDisabled(),'physical preset disabled')
+    check(await page.getByLabel('实物福袋',{exact:true}).isDisabled(),'physical type disabled')
+    check(await page.locator('input[name="objective"][value="physical"]').isDisabled(),'physical objective disabled')
+    await page.getByRole('button',{name:'钻石优先',exact:true}).click()
     await page.getByRole('button',{name:'保存设置',exact:true}).click()
     await page.getByText('已保存，下次运行生效',{exact:true}).waitFor()
     check((await page.evaluate(()=>window.__fixture.config.diamondBudget))===budgetBefore,'presets preserve budget')
-    check((await page.evaluate(()=>window.__fixture.config.fudaiTypes.physical))===true,'preset updates preferences')
+    check((await page.evaluate(()=>window.__fixture.config.fudaiTypes.diamond))===true,'available preset updates preferences')
+    check((await page.evaluate(()=>window.__fixture.config.fudaiTypes.physical))===false,'available preset does not enable physical prizes')
     await page.evaluate(()=>{
       const f=window.__fixture,n=Date.now(),u='https://live.douyin.com/10000001'
       f.insights.rounds=Array.from({length:320},(_,i)=>({key:`round-${i}`,roomUrl:u,lotteryId:`lottery-${i}`,createdAt:n-i*1000,drawAt:n-i*1000,confirmedAt:n-i*1000,result:i===319?'won':'lost',prizeType:i===319?'physical':null,prizeName:i===319?'离线实物奖品':null,claimed:false,budgetCycle:0,claimDueAt:null}))
