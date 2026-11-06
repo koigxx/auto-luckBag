@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
+import { EventEmitter } from 'node:events'
 
 // Synthetic credentials only; no user profile or network access.
 test('saved login requires background evidence, preserves unknown sessions, and cancels logout safely', async () => {
@@ -15,6 +16,9 @@ test('saved login requires background evidence, preserves unknown sessions, and 
   let verdict='connected', probes=0, closedProbes=0
   let release: (() => void) | undefined
   let waitForNavigation: Promise<void> | undefined
+  let ownEntry = true
+  let onReadEntry: (() => void) | undefined
+  const pages: any[] = []
   const cookies = [
     { name: 'sessionid', value: 'synthetic-session', expires: -1, domain: '.douyin.com', path: '/' },
     { name: 'uid_tt', value: 'synthetic-user', expires: -1, domain: '.douyin.com', path: '/' }
@@ -27,6 +31,7 @@ test('saved login requires background evidence, preserves unknown sessions, and 
       unbind: () => { activeAccount = null }
     } }
     if (name === './store') return { store: { get: () => 0 } }
+    if (name === './auth-dom') return { hasOwnProfileEntry: async () => { onReadEntry?.(); return ownEntry } }
     if (name === './auth-probe') return { probeSession: async (_context: unknown, signal: AbortSignal) => {
       if(verdict==='pending')return new Promise(resolve=>{
         if(signal.aborted)resolve('unknown')
@@ -43,11 +48,12 @@ test('saved login requires background evidence, preserves unknown sessions, and 
     newPage: async () => {
       opened++
       let closed = false
-      return {
-        goto: async () => { await waitForNavigation },
-        isClosed: () => closed, close: async () => { closed = true; release?.() },
-        locator: () => ({ first: () => ({ isVisible: async () => true }) })
-      }
+      const page = Object.assign(new EventEmitter(), {
+        goto: async () => { await waitForNavigation; if(closed)throw new Error('Target page, context or browser has been closed') },
+        isClosed: () => closed, close: async () => { closed = true; page.emit('close'); release?.() }
+      })
+      pages.push(page)
+      return page
     },
     cookies: async () => cookies,
     storageState: async (options?: { path: string }) => {
@@ -128,6 +134,28 @@ test('saved login requires background evidence, preserves unknown sessions, and 
     assert.equal(await manual.login(), true)
     assert.equal(opened, 1)
     await manual.logout()
+    // Stale cookies and unrelated avatars cannot prove login; closing while
+    // polling cancels immediately without a Playwright waitForTimeout error.
+    ownEntry = false
+    const missingEntry = new AuthService(browser), savedBeforeCancel = saved
+    const missingLogin = missingEntry.login()
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(missingEntry.getStatus().state, 'checking')
+    await pages.at(-1).close()
+    assert.equal(await missingLogin, false)
+    assert.equal(saved, savedBeforeCancel)
+    assert.equal(activeAccount, null)
+    assert.equal(pages.at(-1).listenerCount('close'), 0)
+    ownEntry = true
+    // A different account appearing during the DOM read must not bind the
+    // earlier account or persist an unverified session.
+    onReadEntry = () => { cookies[1].value = 'synthetic-other'; setImmediate(() => pages.at(-1).close()) }
+    const changedAccount = new AuthService(browser)
+    assert.equal(await changedAccount.login(), false)
+    assert.equal(activeAccount, null)
+    assert.equal(saved, savedBeforeCancel)
+    onReadEntry = undefined
+    cookies[1].value = 'synthetic-user'
     waitForNavigation = new Promise<void>(resolve => { release = resolve })
     const cancelled = new AuthService(browser)
     const loggingIn = cancelled.login()
@@ -136,5 +164,6 @@ test('saved login requires background evidence, preserves unknown sessions, and 
     assert.equal(await loggingIn, false)
     assert.equal(activeAccount, null)
     assert.equal(fs.existsSync(file), false)
+    assert.equal(pages.at(-1).listenerCount('close'), 0)
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }
 })

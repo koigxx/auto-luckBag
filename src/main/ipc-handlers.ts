@@ -22,7 +22,7 @@ export function setupIpcHandlers(win:BrowserWindow,_browser:BrowserManager,auth:
   rooms.setCallbacks(r=>send('room:update',rooms.getRoomPublicInfo(r.id)),log,(_room,result)=>stats.recordParticipation(result),id=>send('room:removed',id))
   discovery.setLogger(m=>log('discover',m));stats.setOnUpdate(s=>send('run-stats:update',s));runner.setCallbacks(m=>log('auto',m),s=>send('auto-run:update',s))
   const safe=(fn:(...args:any[])=>unknown)=>async(_event:unknown,...args:any[])=>{try{return await fn(...args)}catch(e:any){return {success:false,error:e.message,state:runner.getState()}}}
-  ipcMain.handle('auth:login',safe(async()=>{await runner.stop('登录切换');return {success:await auth.login(),isLoggedIn:auth.getLoginStatus()}}))
+  ipcMain.handle('auth:login',safe(async()=>{await runner.stop('登录切换');const success=await auth.login();return {success,isLoggedIn:auth.getLoginStatus(),...(!success?{error:'尚未确认登录，请重新打开登录窗口，完成登录后等待账号连接。'}:{})}}))
   ipcMain.handle('auth:logout',safe(async()=>{await runner.stop('退出账号');await auth.logout();return {success:true}}))
   ipcMain.handle('auth:status',async(_event,force=false)=>{await auth.restoreSession(force===true);return auth.getStatus()})
   ipcMain.handle('room:add',safe(async(url:string,name?:string)=>{const room=await runner.manualRoom(url,name);return {success:true,room:rooms.getRoomPublicInfo(room.id)}}))

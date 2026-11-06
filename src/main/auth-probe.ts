@@ -1,4 +1,5 @@
 import type { BrowserContext, Response } from 'playwright'
+import { hasOwnProfileEntry } from './auth-dom'
 
 export type ProbeResult = 'connected' | 'expired' | 'unknown'
 function isSelfResponse(url: string): boolean {
@@ -33,6 +34,7 @@ export async function probeSession(context: BrowserContext, signal: AbortSignal,
   const evidence = new Promise<ProbeResult>(resolve => { finish = resolve })
   let closed = false
   const abort = () => { finish('unknown'); void page.close().catch(() => {}) }
+  const onClose = () => { closed = true; finish('unknown') }
   const listener = async (response: Response) => {
     try {
       if (!isSelfResponse(response.url())) return
@@ -41,8 +43,17 @@ export async function probeSession(context: BrowserContext, signal: AbortSignal,
     } catch { /* Invalid/unrelated responses provide no authentication evidence. */ }
   }
   page.on('response', listener)
+  page.once('close', onClose)
   signal.addEventListener('abort', abort, { once: true })
   const timer = setTimeout(() => finish('unknown'), timeoutMs)
+  let reading = false
+  const domTimer = setInterval(async () => {
+    if (closed || signal.aborted || reading) return
+    reading = true
+    try {
+      if (await hasOwnProfileEntry(page) && !closed && !signal.aborted && result !== 'expired') finish('connected')
+    } finally { reading = false }
+  }, 500)
   try {
     if (signal.aborted) return 'unknown'
     // Public normal page, not a private API call or replay. No login interaction.
@@ -52,8 +63,10 @@ export async function probeSession(context: BrowserContext, signal: AbortSignal,
   } finally {
     closed = true
     clearTimeout(timer)
+    clearInterval(domTimer)
     signal.removeEventListener('abort', abort)
     page.off('response', listener)
+    page.off('close', onClose)
     await page.close().catch(() => {})
   }
 }

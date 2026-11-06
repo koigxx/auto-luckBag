@@ -20,19 +20,25 @@ test('authentication evidence excludes other users, errors, empty and unrelated 
 test('hidden probe observes only page-generated evidence, closes pages, and handles offline/abort',async()=>{
   const browser=await chromium.launch({headless:true})
   try{
-    for(const mode of ['connected','expired','offline','no-evidence','abort']){
+    for(const mode of ['connected','dom-connected','expired','offline','no-evidence','abort','closed']){
       const context=await browser.newContext()
       const visited:string[]=[]
       await context.route('**/*',async route=>{
         const url=route.request().url();visited.push(url)
         if(mode==='offline'){await route.abort();return}
         if(url===self){await route.fulfill({contentType:'application/json',body:JSON.stringify(mode==='expired'?{is_login:false}:{status_code:0,user:{uid:'123'}})});return}
-        await route.fulfill({contentType:'text/html',body: mode==='no-evidence'||mode==='abort'?'<p>Loading</p>':`<script>fetch('${self}')</script>`})
+        const dom='<div id="douyin-header-menuCt"><a href="https://www.douyin.com/user/self" style="position:fixed;right:20px;top:10px;width:40px;height:40px"><span data-e2e="live-avatar"><img src="data:image/svg+xml,%3Csvg/%3E" width="40" height="40"></span></a></div>'
+        await route.fulfill({contentType:'text/html',body: mode==='dom-connected'?dom:['no-evidence','abort','closed'].includes(mode)?'<p>Loading</p>':`<script>fetch('${self}')</script>`})
       })
       const controller=new AbortController()
       const pending=probeSession(context,controller.signal,mode==='no-evidence'?150:3000)
       if(mode==='abort')controller.abort()
-      assert.equal(await pending,mode==='connected'?'connected':mode==='expired'?'expired':'unknown')
+      if(mode==='closed') {
+        // A user/browser close should resolve without waiting for probe timeout.
+        const page=context.pages()[0]||await context.waitForEvent('page')
+        await page.close()
+      }
+      assert.equal(await pending,['connected','dom-connected'].includes(mode)?'connected':mode==='expired'?'expired':'unknown')
       assert.equal(context.pages().length,0)
       assert.ok(visited.every(url=>url==='https://www.douyin.com/user/self'||url===self))
       await context.close()
