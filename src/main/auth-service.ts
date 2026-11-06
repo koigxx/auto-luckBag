@@ -91,6 +91,8 @@ export class AuthService {
     let lastEvidence=''
     const closed=()=>controller.abort()
     try {
+      await this.browser.setBackgroundMode(false,()=>generation===this.generation&&!controller.signal.aborted)
+      if(generation!==this.generation||controller.signal.aborted)return false
       const context=await this.browser.getContext()
       if(generation!==this.generation||controller.signal.aborted)return false
       page=await context.newPage()

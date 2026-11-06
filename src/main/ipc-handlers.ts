@@ -51,7 +51,7 @@ export function setupIpcHandlers(win:BrowserWindow,_browser:BrowserManager,auth:
   })
   ipcMain.handle('runStats:get',()=>stats.getStats())
   ipcMain.handle('runStats:reset',()=>stats.reset())
-  ipcMain.handle('autoRun:start',safe(async(options={})=>{await _browser.closeManualReview();return {success:true,state:await runner.start(options)}}))
+  ipcMain.handle('autoRun:start',safe(async(options={})=>{return {success:true,state:await runner.start(options)}}))
   ipcMain.handle('autoRun:stop',safe(async()=>({success:true,state:await runner.stop()})))
   ipcMain.handle('autoRun:extend',safe((minutes:number,stopAt:number)=>({success:true,state:runner.extend(minutes,stopAt)})))
   ipcMain.handle('autoRun:finish',safe(async()=>({success:true,state:await runner.finishCurrent()})))

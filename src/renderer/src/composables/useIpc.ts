@@ -183,7 +183,7 @@ export function useIpc() {
       await refreshStats()
       return true
     })
-  const startAutoRun = (options: { sourceUrl?: string; stopAfterMinutes?: number } = {}) =>
+  const startAutoRun = (options: import('../../../shared/run-options').AutoRunOptions = {}) =>
     action('start', async () => {
       const result = await window.api.autoRun.start(options)
       await refreshAccount()

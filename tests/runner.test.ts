@@ -569,6 +569,7 @@ test('stop during a deferred login check cannot start a new run', async () => {
       })
   )
   const starting = h.runner.start()
+  await flush() // Enter the deferred login check after browser preparation.
   await h.runner.stop()
   resolve(true)
   await assert.rejects(starting, /取消/)
@@ -633,7 +634,9 @@ test('stop during resume check cancels the pending auto-resume', async () => {
 })
 test('planned rest resumes only after current checks, and restart is a fresh session', async () => {
   const h = harness()
-  await h.runner.start()
+  let preparations=0
+  h.runner.setPrepareRun(async () => { preparations++ })
+  await h.runner.start({background:true})
   const first = h.repo.account().session.startedAt
   h.repo.change((a) => {
     a.session.phase = 'resting'
@@ -646,6 +649,8 @@ test('planned rest resumes only after current checks, and restart is a fresh ses
   assert.equal(h.env.execution.signal.aborted, false)
   assert.equal(h.logs.filter(m => !m.trim()).length, 0)
   assert.equal(h.logs.filter(m => m.includes('休息结束，检查通过')).length, 1)
+  assert.equal(h.runner.getState().background, true)
+  assert.equal(preparations, 1, 'planned resume does not replace the browser')
   await h.runner.stop()
 })
 
@@ -726,4 +731,51 @@ test('expected execution boundary is not a retry error but actual failures remai
     assert.equal(h.logs.some(x=>x.includes('本轮调度：')), !expected)
     assert.equal(h.runner.getState().waitingReason.includes('异常'),!expected)
   }
+})
+
+test('background preference is validated, fixed for a run, and startup cancellation cannot run tasks', async () => {
+  const h = harness()
+  const modes: boolean[] = []
+  h.runner.setPrepareRun(async mode => { modes.push(mode) })
+  await assert.rejects(h.runner.start({background: 'yes' as any}), /background/)
+  assert.deepEqual(modes, [])
+  await h.runner.start({background:true})
+  assert.equal(h.runner.getState().background, true)
+  await assert.rejects(h.runner.start({background:false}), /尚未结束/)
+  assert.deepEqual(modes, [true])
+  await h.runner.stop()
+  await h.runner.start()
+  assert.equal(h.runner.getState().background, false)
+  assert.deepEqual(modes, [true,false])
+  await h.runner.stop()
+  let release!: () => void
+  h.runner.setPrepareRun(async (_mode,current) => {
+    await new Promise<void>(resolve => { release = resolve })
+    assert.equal(current(), false)
+  })
+  const start = h.runner.start({background:true})
+  const rejected = assert.rejects(start, /启动已取消/)
+  await flush()
+  const stop = h.runner.stop()
+  release()
+  await Promise.all([rejected,stop])
+  assert.equal(h.runner.getState().running, false)
+  assert.equal(h.counts().scanCount, 0)
+  h.runner.setPrepareRun(async () => { throw new Error('session migration failed') })
+  await assert.rejects(h.runner.start({background:true}), /session migration failed/)
+  assert.equal(h.runner.getState().running, false)
+})
+
+
+test('new run cannot change browser mode while a previous stop is still cleaning pages', async () => {
+  const h = harness()
+  await h.runner.start({background:true})
+  let release!: () => void
+  h.env.haltPages = () => new Promise<void>(resolve => { release=resolve })
+  const stopping = h.runner.stop()
+  await flush()
+  await assert.rejects(h.runner.start({background:false}), /尚未结束/)
+  release()
+  await stopping
+  assert.equal(h.runner.getState().running, false)
 })

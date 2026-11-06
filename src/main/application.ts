@@ -27,6 +27,15 @@ const autoRunner = new AutoRunner(discoveryService, roomManager, statsService, {
 roomManager.setUnexpectedClose(()=>{if(autoRunner.getState().running)void autoRunner.stop('参与页面意外关闭，请检查后手动启动')})
 browserManager.setDisconnected(()=>{if(autoRunner.getState().running)void autoRunner.stop('工作浏览器意外关闭，请检查后手动启动')})
 autoRunner.setResumeCheck(() => authService.validateSession())
+autoRunner.setPrepareRun(async (background, current) => {
+  const account = repository.read().activeAccount
+  if (!account) throw new Error('请先登录')
+  await browserManager.setBackgroundMode(background, current)
+  if (!current()) throw new Error('启动已取消')
+  if (!await authService.restoreSession(true) || repository.read().activeAccount !== account)
+    throw new Error('登录或账号状态已变化，请确认后重新启动')
+  if (!current()) throw new Error('启动已取消')
+})
 
 installPipeErrorGuards()
 

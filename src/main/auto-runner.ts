@@ -1,3 +1,6 @@
+import { DEFAULT_BACKGROUND_RUN } from '../shared/run-options'
+import type { AutoRunOptions } from '../shared/run-options'
+export type { AutoRunOptions } from '../shared/run-options'
 import { roomDisplayName } from '../shared/record-presentation'
 import { scheduleExclusionReason, sessionDisplayReason } from '../shared/run-presentation'
 import type { DiscoveryService, DiscoveredRoom, VerifiedFudaiRoom } from './discovery-service'
@@ -30,20 +33,18 @@ export interface AutoRunnerEnvironment {
   clearTimer: (timer: NodeJS.Timeout) => void
 }
 
-export interface AutoRunOptions {
-  sourceUrl?: string
-  scanIntervalSeconds?: number
-  stopAfterMinutes?: number
-  enterBeforeSeconds?: number
-  candidatePoolLimit?: number
-}
 type Candidate = VerifiedFudaiRoom & { evaluation: Evaluation }
 export class AutoRunner {
+  private background = DEFAULT_BACKGROUND_RUN
+  private preparation: Promise<void> | null = null
+  private prepareRun: (background: boolean, current: () => boolean) => Promise<void> = async () => {}
+  setPrepareRun(fn: (background: boolean, current: () => boolean) => Promise<void>): void { this.prepareRun = fn }
   private automatic = false
   private timer: NodeJS.Timeout | null = null
   private busy = false
   private revision = 0
   private beginning = false
+  private stopping = 0
   private tickingRooms = false
   private pool: Candidate[] = []
   private pending: DiscoveredRoom[] = []
@@ -88,6 +89,7 @@ export class AutoRunner {
       running: ['running', 'draining', 'resting', 'resume-check'].includes(s.phase),
       status: s.phase,
       automatic: this.automatic,
+      background: this.background,
       sourceUrl: this.sourceUrl,
       scanIntervalSeconds: this.env.store.get('scanIntervalSeconds'),
       stopAt: s.stopAt,
@@ -123,17 +125,22 @@ export class AutoRunner {
     }
   }
   async start(options: AutoRunOptions = {}): Promise<ReturnType<AutoRunner['getState']>> {
-    if (this.getState().running || this.beginning || this.busy)
+    if (this.getState().running || this.beginning || this.busy || this.stopping > 0)
       throw new Error('运行、休息或收尾操作尚未结束，请稍后再试')
     this.validateOptions(options)
     const revision = ++this.revision
     this.beginning = true
     try {
+      this.preparation = this.prepareRun(options.background ?? DEFAULT_BACKGROUND_RUN, () => revision === this.revision)
+      await this.preparation
+      if (revision !== this.revision) throw new Error('启动已取消')
       if (!(await this.resumeCheck())) throw new Error('登录状态已过期，请重新登录')
     } finally {
+      this.preparation = null
       this.beginning = false
     }
     if (revision !== this.revision) throw new Error('启动已取消')
+    this.background = options.background ?? DEFAULT_BACKGROUND_RUN
     this.sourceUrl = options.sourceUrl || 'https://live.douyin.com'
     // Freeze this cutoff for the run. Planned rest/resume keeps it, while a
     // manual restart re-evaluates stale discovery without deleting user data.
@@ -165,7 +172,7 @@ export class AutoRunner {
       return
     }
     if (s.phase !== 'stopped') throw new Error('当前正在休息、收尾或风险暂停，不能手动绕过')
-    if (this.beginning || this.busy) throw new Error('正在检查运行条件或收尾，请稍后')
+    if (this.beginning || this.busy || this.stopping > 0) throw new Error('正在检查运行条件或收尾，请稍后')
     const revision = ++this.revision
     this.beginning = true
     try {
@@ -210,26 +217,31 @@ export class AutoRunner {
     this.publish()
   }
   async stop(reason = '手动停止'): Promise<ReturnType<AutoRunner['getState']>> {
-    this.revision++
-    this.automatic = false
-    if (this.timer) {
-      this.env.clearTimer(this.timer)
-      this.timer = null
-    }
-    if (this.env.repository.read().activeAccount) this.env.sessionEngine.stop(reason)
-    this.env.execution.stop()
-    this.pool = []
-    this.pending = []
-    this.waitingReason = ''
-    this.retryAt = 0
-    await this.env.haltPages()
-    await this.discovery.close()
-    await this.rooms.closeAllRooms()
-    if(this.env.repository.read().activeAccount)this.env.repository.finishRun(this.env.repository.account().session.reason)
-    this.stats.markStopped()
-    this.publish()
-    return this.getState()
+    this.stopping++
+    try {
+      this.revision++
+      this.automatic = false
+      if (this.timer) {
+        this.env.clearTimer(this.timer)
+        this.timer = null
+      }
+      if (this.env.repository.read().activeAccount) this.env.sessionEngine.stop(reason)
+      this.env.execution.stop()
+      this.pool = []
+      this.pending = []
+      this.waitingReason = ''
+      this.retryAt = 0
+      await this.preparation?.catch(() => {})
+      await this.env.haltPages()
+      await this.discovery.close()
+      await this.rooms.closeAllRooms()
+      if(this.env.repository.read().activeAccount)this.env.repository.finishRun(this.env.repository.account().session.reason)
+      this.stats.markStopped()
+      this.publish()
+      return this.getState()
+    } finally { this.stopping-- }
   }
+
   async pulse(): Promise<void> {
     if (!this.env.repository.read().activeAccount) return
     const before = this.env.repository.account().session.phase
@@ -638,6 +650,8 @@ export class AutoRunner {
     }
   }
   private validateOptions(options: AutoRunOptions): void {
+    if (!options || typeof options !== 'object' || Array.isArray(options)) throw new Error('无效运行选项')
+    if (options.background !== undefined && typeof options.background !== 'boolean') throw new Error('无效配置 background')
     if (options.sourceUrl) {
       const u = new URL(options.sourceUrl)
       if (

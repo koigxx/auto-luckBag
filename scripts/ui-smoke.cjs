@@ -313,7 +313,9 @@ module.exports = async function verifyUI(config, output) {
           finish:async()=>{count('finish');fixture.phase('draining');fixture.state.session.finishRequested=true;return {success:true,state:copy(fixture.state)}},
           skip:async(url,id,today)=>{count(today?'skipToday':'skipRound');fixture.state.candidates=fixture.state.candidates.filter(c=>c.url!==url);return {success:true,state:copy(fixture.state)}},
           status: async () => copy(fixture.state),
-          start: async () => {
+          start: async (options) => {
+            fixture.startOptions=options
+            fixture.state.background=options.background
             count('start')
             await new Promise((resolve) => {
               fixture.releaseStart = resolve
@@ -430,7 +432,12 @@ module.exports = async function verifyUI(config, output) {
     await page.getByRole('button', { name: '参与偏好', exact: true }).click()
     await page.screenshot({ path: path.join(output, 'ui-settings.png'), fullPage: true })
     await nav('运行面板').click()
+    await page.getByText('本次运行选项', {exact:true}).click()
+    check(!await page.getByRole('checkbox', {name:'后台运行',exact:true}).isChecked(), 'background run defaults off')
+    await page.getByRole('checkbox', {name:'后台运行',exact:true}).check()
     await page.getByRole('button', { name: '开始运行', exact: true }).click()
+    check(await page.getByRole('checkbox', {name:'后台运行',exact:true}).isDisabled(), 'mode locked while starting')
+    check(await page.evaluate(()=>window.__fixture.startOptions.background===true), 'background preference reaches IPC')
     check(
       await page.getByRole('button', { name: '正在启动…', exact: true }).isDisabled(),
       'pending start disables repeated submission'
@@ -438,6 +445,7 @@ module.exports = async function verifyUI(config, output) {
     check((await page.evaluate(() => window.__fixture.calls.start)) === 1, 'one start request')
     await page.evaluate(() => window.__fixture.releaseStart())
     await page.getByRole('button', { name: '立即停止', exact: true }).waitFor()
+    check(await page.getByText('后台运行中 · 浏览器窗口已隐藏').isVisible(), 'running mode visible in dashboard')
     await page.evaluate(() => window.__fixture.populate())
     await page.getByText('示例生活好物直播间', { exact: true }).waitFor()
     await page.evaluate(()=>{const f=window.__fixture;f.originalCandidateName=f.state.candidates[0].name;f.state.candidates[0].name=f.state.candidates[0].url;f.emit('auto-run:update',f.state)})

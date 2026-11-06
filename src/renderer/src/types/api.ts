@@ -39,13 +39,7 @@ export interface API {
     extend:(minutes:number,stopAt:number)=>Promise<{success:boolean;error?:string;state:import('./index').AutoRunState}>
     finish:()=>Promise<{success:boolean;error?:string;state:import('./index').AutoRunState}>
     skip:(url:string,id:string,today:boolean)=>Promise<{success:boolean;error?:string;state:import('./index').AutoRunState}>
-    start: (options?: {
-      sourceUrl?: string
-      scanIntervalSeconds?: number
-      stopAfterMinutes?: number
-      enterBeforeSeconds?: number
-      candidatePoolLimit?: number
-    }) => Promise<{
+    start: (options?: import('../../../shared/run-options').AutoRunOptions) => Promise<{
       success: boolean
       state: import('./index').AutoRunState
       error?: string

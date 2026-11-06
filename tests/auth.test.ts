@@ -63,6 +63,7 @@ test('saved login requires background evidence, preserves unknown sessions, and 
     }
   }
   const browser: any = {
+    setBackgroundMode: async () => {},
     setStorageStatePath: () => {}, closeContext: async () => { existing = null },
     getExistingContext: () => existing,
     getContext: async () => { contexts++; return existing = context }

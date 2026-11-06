@@ -42,13 +42,7 @@ const api = {
     extend:(minutes:number,stopAt:number)=>ipcRenderer.invoke('autoRun:extend',minutes,stopAt),
     finish:()=>ipcRenderer.invoke('autoRun:finish'),
     skip:(url:string,id:string,today:boolean)=>ipcRenderer.invoke('autoRun:skip',url,id,today),
-    start: (options?: {
-      sourceUrl?: string
-      scanIntervalSeconds?: number
-      stopAfterMinutes?: number
-      enterBeforeSeconds?: number
-      candidatePoolLimit?: number
-    }) => ipcRenderer.invoke('autoRun:start', options),
+    start: (options?: import('../shared/run-options').AutoRunOptions) => ipcRenderer.invoke('autoRun:start', options),
     stop: () => ipcRenderer.invoke('autoRun:stop'),
     status: () => ipcRenderer.invoke('autoRun:status')
   },

@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { DEFAULT_BACKGROUND_RUN } from '../../../shared/run-options'
+import type { AutoRunOptions } from '../../../shared/run-options'
 import type { AppConfig, AutoRunState, RoomInfo, RunStats, Stats } from '../types'
 import type { Insights } from '../../../shared/insights'
 import UiIcon from './UiIcon.vue'
@@ -21,7 +23,7 @@ const props = defineProps<{
   dirty: boolean
 }>()
 const emit = defineEmits<{
-  start: [options: { sourceUrl?: string; stopAfterMinutes?: number }]
+  start: [options: AutoRunOptions]
   finish: []
   extend: [minutes:number,stopAt:number]
   skip:[url:string,id:string,today:boolean]
@@ -34,6 +36,7 @@ const emit = defineEmits<{
   remove: [id: string]
 }>()
 const tr = (zh: string, en: string) => (props.config.language === 'en-US' ? en : zh)
+const background = ref(DEFAULT_BACKGROUND_RUN)
 const sourceUrl = ref('https://live.douyin.com')
 const stopAfter = ref<number | ''>('')
 const extensionOpen = ref(false)
@@ -149,6 +152,7 @@ const duration = (value: number | null | undefined) =>
 function start() {
   emit('start', {
     sourceUrl: sourceUrl.value.trim(),
+    background: background.value,
     stopAfterMinutes: stopAfter.value === '' ? undefined : Number(stopAfter.value)
   })
 }
@@ -159,7 +163,7 @@ function start() {
     <section v-if="active" class="live-control surface" :aria-label="tr('运行控制', 'Run controls')">
       <div class="live-control-main">
         <span class="live-beacon" :class="{resting: phase === 'resting'}"><UiIcon :name="phase === 'resting' ? 'pause' : 'play'" /></span>
-        <div class="live-control-copy"><h2>{{ title }}</h2><p>{{ description }}</p></div>
+        <div class="live-control-copy"><h2>{{ title }}</h2><p>{{ description }}</p><p v-if="state?.background">{{ tr('后台运行中 · 浏览器窗口已隐藏', 'Running in background · Browser windows hidden') }}</p></div>
         <div class="control-deadline"><span>{{ timedWaiting ? tr('定时结束','Scheduled stop') : phase === 'resting' ? tr('距离恢复','Resume in') : tr('本段截止','Session ends') }}</span><strong>{{ timedWaiting ? time(state?.session?.stopAt) : phase === 'resting' ? duration(state?.resumeRemainingSeconds) : time(state?.session?.hardStopAt) }}</strong></div>
       </div>
       <div class="live-control-actions">
@@ -230,6 +234,11 @@ function start() {
         </div>
         <details v-if="!active && !held" class="run-options">
           <summary>{{ tr('本次运行选项', 'Options for this run') }}</summary>
+          <label class="background-option">
+            <input v-model="background" type="checkbox" :disabled="busy.start" />
+            <span>{{ tr('后台运行', 'Run in background') }}</span>
+          </label>
+          <p class="muted">{{ tr('自动任务不显示浏览器窗口；登录或人工验证时，主动打开处理窗口。', 'Task pages stay hidden. Open a browser when sign-in or manual verification is needed.') }}</p>
           <div class="form-grid compact">
             <label class="field-label"
               >{{ tr('发现入口', 'Discovery page')
@@ -432,3 +441,8 @@ function start() {
     </details>
   </div>
 </template>
+
+<style scoped>
+.background-option { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.background-option input { width: 16px; height: 16px; }
+</style>
