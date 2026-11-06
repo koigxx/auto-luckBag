@@ -39,6 +39,9 @@ const tr = (zh: string, en: string) => (props.config.language === 'en-US' ? en :
 const background = ref(DEFAULT_BACKGROUND_RUN)
 const sourceUrl = ref('https://live.douyin.com')
 const stopAfter = ref<number | ''>('')
+const durationError = computed(() => stopAfter.value !== '' &&
+  (!Number.isInteger(Number(stopAfter.value)) || Number(stopAfter.value) < 1 || Number(stopAfter.value) > 1440)
+  ? tr('请输入 1–1440 之间的整数分钟，或留空按运行计划执行。', 'Enter a whole number from 1 to 1440 minutes, or leave blank to use the plan.') : '')
 const extensionOpen = ref(false)
 const extensionMinutes = ref(30)
 const extensionBase = ref<number | null>(null)
@@ -54,6 +57,7 @@ const phase = computed(() => props.state?.status || 'stopped')
 const timedWaiting = computed(() => !!props.state?.session && waitingForScheduledStop(props.state.session))
 const candidateName = (candidate: {name:string;url:string}) => roomDisplayName(candidate.name,candidate.url,props.config.language==='en-US')
 const active = computed(() => !!props.state?.running)
+const idleWorkspace = computed(() => !active.value && !props.rooms.length && !props.state?.candidates?.length && !props.state?.pendingVerifyCount)
 const strategyOpen = ref(false)
 watch(active, () => { strategyOpen.value = false; extensionOpen.value = false })
 watch(() => props.state?.stopAt, () => { extensionOpen.value=false })
@@ -81,7 +85,10 @@ const labels = computed(() => ({
 }))
 const status = computed(() => labels.value[phase.value as keyof typeof labels.value] || phase.value)
 const title = computed(() =>
-  props.authState === 'checking' ? tr('正在后台校验登录', 'Verifying your saved session')
+  props.busy.stop ? tr('正在停止并清理页面', 'Stopping and closing task pages')
+    : props.busy.start ? tr('正在准备本次运行', 'Preparing this run')
+    : props.busy.login ? tr('请在浏览器中完成登录', 'Complete sign-in in the browser')
+    : props.authState === 'checking' ? tr('正在后台校验登录', 'Verifying your saved session')
     : props.authState === 'unknown' ? tr('暂时无法验证登录状态', 'Unable to verify your session')
     : props.authState === 'expired' ? tr('登录已失效，请重新登录', 'Session expired. Please sign in')
     : !props.loggedIn
@@ -93,7 +100,10 @@ const title = computed(() =>
         : tr('准备好，开始下一轮', 'Ready for your next session')
 )
 const description = computed(() =>
-  props.authState === 'checking' ? tr('正在复用保存的会话，不会打开登录窗口。', 'Checking your saved session without opening a login window.')
+  props.busy.stop ? tr('正在取消在途任务，请等待清理完成。停止后不会自动恢复。', 'Cancelling in-flight work. Wait for cleanup; the run will not resume automatically.')
+    : props.busy.start ? tr('正在准备浏览器并校验登录，完成后开始运行。', 'Preparing the browser and verifying sign-in before starting.')
+    : props.busy.login ? tr('完成登录后保持浏览器打开，应用确认账号后会自动关闭登录页。', 'Keep the browser open after signing in. The app closes it once your account is verified.')
+    : props.authState === 'checking' ? tr('正在复用保存的会话，不会打开登录窗口。', 'Checking your saved session without opening a login window.')
     : props.authState === 'unknown' ? tr('已保留原登录信息。网络异常或页面未返回明确结果，请稍后重试。', 'Your session is retained. Check your connection and retry.')
     : !props.loggedIn
     ? tr(
@@ -150,6 +160,7 @@ const scheduleTime = (value: number | null | undefined) => value == null ? '—'
 const duration = (value: number | null | undefined) =>
   value == null ? '—' : `${Math.floor(value / 60)}:${String(value % 60).padStart(2, '0')}`
 function start() {
+  if (durationError.value || props.busy.start || props.busy.stop) return
   emit('start', {
     sourceUrl: sourceUrl.value.trim(),
     background: background.value,
@@ -172,6 +183,7 @@ function start() {
         <button class="button small" :disabled="busy.finish || state?.session?.finishRequested || busy.stop" @click="emit('finish')">{{ state?.session?.finishRequested ? tr('正在等待本轮结束','Finishing current round') : tr('本轮结束后停止','Stop after this round') }}</button>
         <button class="button stop small" :disabled="busy.stop" @click="emit('stop')"><UiIcon name="stop" :size="16" />{{ busy.stop ? tr('正在停止…','Stopping…') : tr('立即停止','Stop now') }}</button>
       </div>
+      <p class="stop-guidance" role="status">{{ busy.stop ? tr('正在清理任务页面，请稍候；不会自动恢复。', 'Closing task pages. Please wait; automation will not resume.') : state?.session?.finishRequested ? tr('已停止接新轮，当前轮结束后退出；仍遵守原截止时间。', 'No new rounds. Finish the current round within the existing deadline.') : tr('本轮结束后停止：完成当前轮再退出。立即停止：取消当前任务。', 'Stop after this round finishes the current round. Stop now cancels current work.') }}</p>
       <div v-if="extensionOpen && canExtend && extensionBase" id="extend-run" class="extend-run">
         <div><strong>{{ tr('延长本次定时运行','Extend this scheduled run') }}</strong><p>{{ tr('从原结束时间增加；休息、允许时段和每日上限仍然生效。已开始收尾的时段不会重新接任务。','Adds time to the original end. Breaks, allowed hours and daily limits still apply. A draining segment will finish first.') }}</p></div>
         <label>{{ tr('增加时长','Add time') }}<select :aria-label="tr('增加时长','Add time')" v-model.number="extensionMinutes" :disabled="busy.extend"><option :value="15">15 {{ tr('分钟','min') }}</option><option :value="30">30 {{ tr('分钟','min') }}</option><option :value="60">60 {{ tr('分钟','min') }}</option></select></label>
@@ -185,6 +197,7 @@ function start() {
         class="run-stage"
         :class="{ 'is-active': active, 'needs-attention': held }"
         aria-labelledby="run-title"
+        :aria-busy="!!(busy.start || busy.stop || busy.login)"
       >
         <div class="stage-top">
           <span
@@ -199,6 +212,29 @@ function start() {
         </div>
         <h2 id="run-title">{{ title }}</h2>
         <p class="stage-description">{{ description }}</p>
+        <section v-if="loggedIn && !held" class="launch-options" aria-labelledby="launch-options-title" :aria-busy="!!busy.start">
+          <div class="launch-heading"><h3 id="launch-options-title">{{ tr('本次运行选项', 'Options for this run') }}</h3><span>{{ tr('仅用于本次启动', 'For this start') }}</span></div>
+          <label class="run-mode-card" :class="{ selected: background }">
+            <span class="mode-icon"><UiIcon :name="background ? 'shield' : 'rooms'" :size="22" /></span>
+            <span class="mode-copy"><strong>{{ tr('后台运行', 'Run in background') }}</strong><small id="background-help">{{ background ? tr('任务不弹浏览器；进度在此查看。', 'Task windows stay hidden. Follow progress here.') : tr('开启后隐藏任务浏览器，减少窗口打扰。', 'Hide task browser windows to reduce interruptions.') }}</small></span>
+            <input v-model="background" type="checkbox" :aria-label="tr('后台运行', 'Run in background')" aria-describedby="background-help" :disabled="busy.start || busy.stop" />
+          </label>
+          <p class="launch-note">{{ tr('登录或验证需要你处理时，可主动打开浏览器。', 'Open the browser when sign-in or verification needs your attention.') }}</p>
+          <div class="form-grid compact">
+            <label class="field-label">{{ tr('发现入口', 'Discovery page') }}<select v-model="sourceUrl" :aria-label="tr('发现入口', 'Discovery page')" :disabled="busy.start || busy.stop">
+              <option value="https://live.douyin.com">{{ tr('直播首页', 'Live home') }}</option>
+              <option value="https://live.douyin.com/follow">{{ tr('关注页', 'Following') }}</option>
+              <option value="https://live.douyin.com/category">{{ tr('分类页', 'Categories') }}</option>
+            </select></label>
+            <label class="field-label" for="run-duration">{{ tr('定时停止（分钟）', 'Stop after (minutes)') }}<input id="run-duration" v-model="stopAfter" type="number" min="1" max="1440" step="1" :disabled="busy.start || busy.stop" :aria-invalid="!!durationError" :aria-describedby="durationError ? 'run-duration-error' : 'run-duration-help'" :placeholder="tr('按运行计划执行', 'Use the session plan')" /></label>
+          </div>
+          <p v-if="durationError" id="run-duration-error" class="field-error" role="alert">{{ durationError }}</p>
+          <div class="duration-presets" role="group" :aria-label="tr('快捷运行时长', 'Quick duration')">
+            <button v-for="minutes in [30, 60, 120]" :key="minutes" type="button" :disabled="busy.start || busy.stop" :aria-pressed="stopAfter === minutes" @click="stopAfter = minutes">{{ minutes }} {{ tr('分钟', 'min') }}</button>
+            <button type="button" :disabled="busy.start || busy.stop" :aria-pressed="stopAfter === ''" @click="stopAfter = ''">{{ tr('按计划', 'Use plan') }}</button>
+          </div>
+          <p id="run-duration-help" class="launch-note">{{ tr('定时结束仍遵守休息、允许时段和每日上限。', 'Breaks, allowed hours and daily limits still apply.') }}</p>
+        </section>
         <div class="stage-actions">
           <button v-if="authState === 'checking' || authState === 'unknown'" class="button primary large" :disabled="authState === 'checking'" @click="emit('checkLogin')">
             {{ authState === 'checking' ? tr('校验中…', 'Checking…') : tr('重新校验', 'Retry verification') }}
@@ -216,6 +252,8 @@ function start() {
             class="button primary large"
             :disabled="
               busy.start ||
+              busy.stop ||
+              !!durationError ||
               busy.save ||
               busy.addRoom ||
               dirty ||
@@ -227,39 +265,13 @@ function start() {
               busy.start ? tr('正在启动…', 'Starting…') : tr('开始运行', 'Start run')
             }}
           </button>
-          <button class="button text-button" @click="emit('settings')">
+          <button v-if="busy.start" class="button" :disabled="busy.stop" @click="emit('stop')">{{ busy.stop ? tr('正在取消…', 'Cancelling…') : tr('取消启动', 'Cancel start') }}</button>
+          <button v-else class="button text-button" @click="emit('settings')">
             {{ dirty ? tr('有未保存的设置', 'Unsaved settings') : tr('调整策略', 'Edit strategy')
             }}<UiIcon name="chevron" :size="16" />
           </button>
         </div>
-        <details v-if="!active && !held" class="run-options">
-          <summary>{{ tr('本次运行选项', 'Options for this run') }}</summary>
-          <label class="background-option">
-            <input v-model="background" type="checkbox" :disabled="busy.start" />
-            <span>{{ tr('后台运行', 'Run in background') }}</span>
-          </label>
-          <p class="muted">{{ tr('自动任务不显示浏览器窗口；登录或人工验证时，主动打开处理窗口。', 'Task pages stay hidden. Open a browser when sign-in or manual verification is needed.') }}</p>
-          <div class="form-grid compact">
-            <label class="field-label"
-              >{{ tr('发现入口', 'Discovery page')
-              }}<select v-model="sourceUrl">
-                <option value="https://live.douyin.com">{{ tr('直播首页', 'Live home') }}</option>
-                <option value="https://live.douyin.com/follow">{{ tr('关注页', 'Following') }}</option>
-                <option value="https://live.douyin.com/category">{{ tr('分类页', 'Categories') }}</option>
-              </select></label
-            >
-            <label class="field-label"
-              >{{ tr('定时停止（分钟）', 'Stop after (minutes)')
-              }}<input
-                v-model="stopAfter"
-                type="number"
-                min="1"
-                max="1440"
-                step="1"
-                :placeholder="tr('按运行计划执行', 'Use the session plan')"
-            /></label>
-          </div>
-        </details>
+
       </section>
       <aside class="plan-summary surface" aria-label="本次计划">
         <div class="section-heading">
@@ -331,7 +343,7 @@ function start() {
       </div>
       <OutcomeBar v-if="report" :won="report.won" :lost="report.lost" :unknown="report.unknown" :pending="report.pending" :language="config.language" />
     </section>
-    <div class="activity-grid">
+    <div class="activity-grid" :class="{ 'idle-workspace': idleWorkspace }">
       <section class="surface current-rooms">
         <div class="section-heading">
           <h2>
@@ -370,7 +382,7 @@ function start() {
           <RoomStageTimeline :timeline="room.timeline" :phase="room.phase" :language="config.language" />
           <footer><span>{{ tr('本次已结算','Rounds settled') }} <b>{{ room.fudaiCount }}</b> {{ tr('轮','') }}</span><span>{{ tr('结果以本人弹窗为准','Only your result counts') }}</span></footer>
         </article>
-        <div class="monitor-resources">
+        <div v-if="active || rooms.length" class="monitor-resources">
           <div class="resource-heading"><UiIcon name="diamond" :size="17" /><h3>{{ tr('预算与节奏','Budget & pace') }}</h3></div>
           <div class="resource-caption"><span>{{ tr('剩余钻石预算','Diamond budget left') }}</span><strong>{{ loggedIn ? budget?.remaining ?? '—' : '—' }}<small> / {{ budget?.effective ?? config.diamondBudget }}</small></strong></div>
           <div class="resource-meter" role="meter" :aria-label="tr('预算已占用比例','Budget allocated')" :aria-valuenow="usage" aria-valuemin="0" aria-valuemax="100"><span class="spent" :style="{width: `${Math.min(usage, (budget?.spent ?? 0) / (budget?.effective || 1) * 100)}%`}"/><span class="reserved" :style="{width: `${Math.max(0, usage - (budget?.spent ?? 0) / (budget?.effective || 1) * 100)}%`}"/></div>
@@ -380,7 +392,7 @@ function start() {
           <p class="resource-note">{{ tr(`运行 ${config.policy.sessionMin}–${config.policy.sessionMax} 分钟后，按计划休息。`, `Planned breaks follow ${config.policy.sessionMin}–${config.policy.sessionMax} active minutes.`) }}</p>
         </div>
       </section>
-      <section class="surface candidates">
+      <section v-if="!idleWorkspace" class="surface candidates">
         <div class="section-heading">
           <h2>
             {{ tr('候选队列', 'Candidate queue')
@@ -441,8 +453,3 @@ function start() {
     </details>
   </div>
 </template>
-
-<style scoped>
-.background-option { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
-.background-option input { width: 16px; height: 16px; }
-</style>

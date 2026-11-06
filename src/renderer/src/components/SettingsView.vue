@@ -55,10 +55,10 @@ async function confirmBudgetReset() {
   if (await props.onResetBudget()) resetBudgetOpen.value = false
 }
 const groups = [
-  { id: 'preferences', icon: 'gift', zh: '参与偏好', en: 'Participation' },
-  { id: 'budget', icon: 'diamond', zh: '支出与粉丝团', en: 'Spending & membership' },
-  { id: 'schedule', icon: 'clock', zh: '运行与休息', en: 'Run & rest' },
-  { id: 'advanced', icon: 'settings', zh: '高级设置', en: 'Advanced' }
+  { id: 'preferences', icon: 'gift', zh: '参与偏好', en: 'Participation', detail: ['目标与福袋类型', 'Goals and prize types'] },
+  { id: 'budget', icon: 'diamond', zh: '支出与粉丝团', en: 'Spending & membership', detail: ['额度与付费条件', 'Limits and paid eligibility'] },
+  { id: 'schedule', icon: 'clock', zh: '运行与休息', en: 'Run & rest', detail: ['时段与每日上限', 'Hours and daily allowance'] },
+  { id: 'advanced', icon: 'settings', zh: '高级设置', en: 'Advanced', detail: ['发现与操作间隔', 'Discovery and pacing'] }
 ]
 type NumberField = {
   key: keyof Policy
@@ -336,9 +336,10 @@ async function save() {
         type="button"
         :class="{ selected: section === group.id }"
         :aria-pressed="section === group.id"
+        :aria-label="tr(group.zh, group.en)"
         @click="section = group.id"
       >
-        <UiIcon :name="group.icon" :size="18" />{{ tr(group.zh, group.en) }}
+        <UiIcon :name="group.icon" :size="18" /><span>{{ tr(group.zh, group.en) }}<small>{{ tr(group.detail[0], group.detail[1]) }}</small></span>
       </button>
       <p>{{ tr('修改后统一保存', 'Save all changes together') }}</p>
     </nav>
@@ -356,11 +357,7 @@ async function save() {
       </div>
       <fieldset :disabled="running || saving">
         <section v-show="section === 'preferences'" class="settings-section">
-          <h3>{{tr('快捷方案','Quick presets')}}</h3>
-          <div class="preset-options"><button v-for="item in [{id:'existing',label:'仅已有资格'},{id:'physical',label:'实物优先（暂不可用）'},{id:'diamond',label:'钻石优先'},{id:'balanced',label:'全部均衡'}]" :key="item.id" type="button" class="button small" :disabled="item.id === 'physical'" @click="applyPreset(item.id as ParticipationPreset)">{{item.label}}</button></div>
-          <p class="inline-notice">{{tr('电脑端暂不支持超级福袋，实物相关选项暂不可选。“全部类型”仅表示当前已支持类型，不代表支持超级福袋。','Super Lucky Bags are not supported on desktop. Physical options are disabled; All types includes supported types only.')}}</p>
           <p v-if="draft.fudaiTypes.physical || draft.policy.objective === 'physical'" class="inline-notice error">{{tr('旧配置包含实物偏好，请选择“钻石优先”或“全部均衡”后保存。','Your saved configuration includes physical prizes. Choose Diamonds or Balanced and save.')}}</p>
-          <p class="microcopy">{{tr('方案仅调整参与偏好，保留现有预算、付费限制和运行节奏。检查后保存生效。','Presets change preferences only. Spending limits and pacing stay as configured. Review and save to apply.')}}</p>
           <h2>{{ tr('先选你更关注的机会', 'Choose what matters to you') }}</h2>
           <p class="section-description">
             {{
@@ -396,6 +393,7 @@ async function save() {
               )
             }}
           </p>
+          <p class="inline-notice">{{tr('电脑端暂不支持超级福袋，实物相关选项暂不可选。“全部类型”仅表示当前已支持类型，不代表支持超级福袋。','Super Lucky Bags are not supported on desktop. Physical options are disabled; All types includes supported types only.')}}</p>
           <div class="type-options">
             <label
               v-for="item in [
@@ -418,6 +416,11 @@ async function save() {
               />{{ tr(item.zh, item.en) }}</label
             >
           </div>
+          <aside class="preference-presets" :aria-label="tr('快捷方案', 'Quick presets')">
+          <h3>{{tr('快捷方案','Quick presets')}}</h3>
+          <div class="preset-options"><button v-for="item in [{id:'existing',label:'仅已有资格',en:'Existing eligibility'},{id:'physical',label:'实物优先（暂不可用）',en:'Physical (unavailable)'},{id:'diamond',label:'钻石优先',en:'Diamonds'},{id:'balanced',label:'全部均衡',en:'Balanced'}]" :key="item.id" type="button" class="button small" :disabled="item.id === 'physical'" @click="applyPreset(item.id as ParticipationPreset)">{{tr(item.label,item.en)}}</button></div>
+          <p class="microcopy">{{tr('方案仅调整参与偏好，保留现有预算、付费限制和运行节奏。检查后保存生效。','Presets change preferences only. Spending limits and pacing stay as configured. Review and save to apply.')}}</p>
+          </aside>
           <div class="quiet-note">
             <UiIcon name="check" :size="17" />{{
               tr(

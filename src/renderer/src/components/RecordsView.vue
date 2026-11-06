@@ -195,6 +195,12 @@ async function confirm() {
           <h2 id="review-title"><UiIcon name="alert" />{{ tr('异常待办', 'Issues to resolve') }}</h2>
           <span class="status-pill warning">{{ unresolved.length + risks.length }}</span>
         </div>
+        <ol v-if="risks.length" class="review-steps" :aria-label="tr('异常处理步骤', 'Issue resolution steps')">
+          <li><span>1</span><div><strong>{{ tr('打开浏览器', 'Open browser') }}</strong><small>{{ tr('完成验证，保持页面打开', 'Complete verification and keep it open') }}</small></div></li>
+          <li><span>2</span><div><strong>{{ tr('检查并完成', 'Check and complete') }}</strong><small>{{ tr('校验页面、登录与账号', 'Verify page, sign-in and account') }}</small></div></li>
+          <li><span>3</span><div><strong>{{ tr('手动开始运行', 'Start manually') }}</strong><small>{{ tr('全部待办处理后再启动', 'Resolve all holds before starting') }}</small></div></li>
+        </ol>
+        <p v-if="unresolved.length" class="review-prerequisite"><UiIcon name="info" :size="16" />{{ tr('有支付待核对：请先核对实际扣款，才能完成异常处理。', 'Payment review required: check actual charges before resolving holds.') }}</p>
         <div v-for="payment in unresolved" :key="payment.id" class="review-row">
           <div>
             <strong>{{ name(payment.roomUrl) }} · {{ payment.cost }} {{ tr('钻', 'diamonds') }}</strong>
@@ -233,7 +239,7 @@ async function confirm() {
             <p v-if="running">{{ tr('请等待自动任务停止后再处理。','Wait for automation to stop.') }}</p>
           </div>
           <div class="button-row">
-            <button class="button small" :disabled="running || busy[`risk-open:${riskId(risk)}`] || busy[`risk-done:${riskId(risk)}`]" @click="riskAction(riskId(risk),false)">{{ tr('前往浏览器处理','Open browser to resolve') }}</button>
+            <button class="button small" :disabled="running || busy[`risk-open:${riskId(risk)}`] || busy[`risk-done:${riskId(risk)}`]" @click="riskAction(riskId(risk),false)">{{ busy[`risk-open:${riskId(risk)}`] ? tr('正在打开…','Opening…') : tr('前往浏览器处理','Open browser to resolve') }}</button>
             <button class="button small" :disabled="running || !!unresolved.length || busy[`risk-done:${riskId(risk)}`] || busy[`risk-open:${riskId(risk)}`]" @click="riskAction(riskId(risk),true)">{{ busy[`risk-done:${riskId(risk)}`] ? tr('正在检查…','Checking…') : tr('已处理，检查并完成','Check and complete') }}</button>
           </div>
         </div>

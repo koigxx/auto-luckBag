@@ -3,6 +3,13 @@ const fs = require('node:fs')
 const path = require('node:path')
 const assert = require('node:assert/strict')
 
+// Capture fixed navigation at its natural viewport position, not mid-scroll.
+async function capture(page, options) {
+  await page.evaluate(() => window.scrollTo(0, 0))
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+  await page.screenshot(options)
+}
+
 // This fixture supplies all IPC results and fulfills every browser request locally.
 module.exports = async function verifyUI(config, output) {
   const root = path.resolve(__dirname, '..')
@@ -381,7 +388,7 @@ module.exports = async function verifyUI(config, output) {
       (await page.getByRole('button', { name: '登录抖音', exact: true }).count()) === 2,
       'sign-in has a clear primary entry'
     )
-    await page.screenshot({ path: path.join(output, 'ui-overview-empty.png'), fullPage: true })
+    await capture(page,{ path: path.join(output, 'ui-overview-empty.png'), fullPage: true })
     await nav('策略设置').click()
     await page.getByRole('button', { name: '支出与粉丝团', exact: true }).click()
     await page.getByLabel('总钻石预算', { exact: true }).fill('12')
@@ -430,11 +437,40 @@ module.exports = async function verifyUI(config, output) {
     )
     await page.getByRole('button', { name: '还原更改', exact: true }).click()
     await page.getByRole('button', { name: '参与偏好', exact: true }).click()
-    await page.screenshot({ path: path.join(output, 'ui-settings.png'), fullPage: true })
+    check(await page.getByRole('navigation', {name:'设置分组'}).getByText('目标与福袋类型').isVisible(), 'setting groups explain their purpose')
+    check(await page.getByRole('heading', {name:'先选你更关注的机会'}).evaluate(el=>el.getBoundingClientRect().top) < await page.getByRole('heading', {name:'快捷方案'}).evaluate(el=>el.getBoundingClientRect().top), 'primary preferences precede optional presets')
+    await capture(page,{ path: path.join(output, 'ui-settings.png'), fullPage: true })
     await nav('运行面板').click()
-    await page.getByText('本次运行选项', {exact:true}).click()
+    const skipLink=page.getByRole('link',{name:'跳转到主要内容',exact:true})
+    await skipLink.focus()
+    await skipLink.press('Enter')
+    check(await page.evaluate(()=>document.activeElement.id==='main-content'), 'skip link moves keyboard focus to main content')
+    check(await page.getByRole('heading',{name:'本次运行选项',exact:true}).isVisible(), 'launch options are visible without disclosure')
+    check(await page.locator('.idle-workspace').isVisible(), 'stopped empty workspace uses compact manual entry')
+    check(await page.locator('.dashboard-view .candidates').count()===0, 'empty candidate queue stays out of startup workspace')
+    check(await page.getByRole('meter',{name:'预算已占用比例',exact:true}).count()===1, 'startup presents budget once')
+    check(await page.getByRole('button',{name:'手动参与',exact:true}).isEnabled(), 'compact workspace retains manual entry')
+    await page.getByLabel('定时停止（分钟）', {exact:true}).fill('1441')
+    check(await page.getByRole('button',{name:'开始运行',exact:true}).isDisabled(), 'invalid duration prevents start')
+    check(await page.locator('#run-duration').getAttribute('aria-invalid')==='true', 'invalid duration exposed to assistive tools')
+    check(await page.locator('#run-duration-error').isVisible(), 'duration error stays next to field')
+    await page.getByRole('button',{name:'60 分钟',exact:true}).click()
+    check(await page.locator('#run-duration').inputValue()==='60', 'duration shortcut updates field')
+    check(await page.getByRole('button',{name:'60 分钟',exact:true}).getAttribute('aria-pressed')==='true', 'chosen shortcut exposes selected state')
+    check(await page.locator('#run-duration-error').count()===0, 'valid shortcut clears inline error')
+    await page.getByRole('button',{name:'按计划',exact:true}).click()
+    check(await page.locator('#run-duration').inputValue()==='', 'plan shortcut resets duration')
+    for(const width of [800,390]) {
+      await page.setViewportSize({width,height:820})
+      check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth), 'launch options reflow at '+width)
+    }
+    await page.setViewportSize({width:1180,height:820})
+    await page.emulateMedia({reducedMotion:'reduce'})
+    check(await page.locator('.run-mode-card').evaluate(el=>getComputedStyle(el).transitionDuration==='0s'), 'reduced motion keeps launch controls static')
+    await page.emulateMedia({reducedMotion:'no-preference'})
     check(!await page.getByRole('checkbox', {name:'后台运行',exact:true}).isChecked(), 'background run defaults off')
     await page.getByRole('checkbox', {name:'后台运行',exact:true}).check()
+    await capture(page,{path:path.join(output,'ui-start-options.png'),fullPage:true})
     await page.getByRole('button', { name: '开始运行', exact: true }).click()
     check(await page.getByRole('checkbox', {name:'后台运行',exact:true}).isDisabled(), 'mode locked while starting')
     check(await page.evaluate(()=>window.__fixture.startOptions.background===true), 'background preference reaches IPC')
@@ -443,8 +479,12 @@ module.exports = async function verifyUI(config, output) {
       'pending start disables repeated submission'
     )
     check((await page.evaluate(() => window.__fixture.calls.start)) === 1, 'one start request')
+    check(await page.getByRole('button',{name:'取消启动',exact:true}).isVisible(), 'startup has a visible cancel action')
+    check(await page.getByLabel('发现入口',{exact:true}).isDisabled(), 'source is locked during startup')
+    check(await page.getByRole('heading',{name:'正在准备本次运行',exact:true}).isVisible(), 'pending startup explains current state')
     await page.evaluate(() => window.__fixture.releaseStart())
     await page.getByRole('button', { name: '立即停止', exact: true }).waitFor()
+    check(await page.locator('.dashboard-view .candidates').isVisible() && await page.locator('.monitor-resources').isVisible(), 'active workspace restores queue and resource monitoring')
     check(await page.getByText('后台运行中 · 浏览器窗口已隐藏').isVisible(), 'running mode visible in dashboard')
     await page.evaluate(() => window.__fixture.populate())
     await page.getByText('示例生活好物直播间', { exact: true }).waitFor()
@@ -465,16 +505,16 @@ module.exports = async function verifyUI(config, output) {
     check(await page.locator('#run-plan').isVisible(),'strategy can be expanded during a run')
     await page.getByRole('button',{name:'收起策略',exact:true}).click()
     await page.locator('.app-notice.success').waitFor({state:'hidden'})
-    await page.screenshot({ path: path.join(output, 'ui-overview-running.png'), fullPage: true })
+    await capture(page,{ path: path.join(output, 'ui-overview-running.png'), fullPage: true })
     check((await page.locator('.room-timeline [aria-current="step"] strong').textContent())==='开奖与核对','phase highlight follows main-process draw stage')
     check((await page.getByRole('progressbar',{name:'开奖与核对',exact:true}).getAttribute('aria-valuenow'))==='14','draw progress uses its own confirmed-to-draw interval')
     await page.evaluate(()=>{const f=window.__fixture;f.savedTimeline={...f.rooms[0].timeline};f.rooms[0].phase='等待评论反馈';f.rooms[0].timeline={...f.savedTimeline,stage:'prepare',endsAt:null,remainingSeconds:null};f.emit('room:update',f.rooms[0])})
     check((await page.getByRole('progressbar',{name:'准备任务',exact:true}).getAttribute('aria-valuenow'))===null,'unknown task completion duration has no fabricated percentage')
-    await page.screenshot({path:path.join(output,'ui-task-preparing.png'),fullPage:true})
+    await capture(page,{path:path.join(output,'ui-task-preparing.png'),fullPage:true})
     await page.evaluate(()=>{const f=window.__fixture;const now=Date.now();f.rooms[0].phase='等待下一轮福袋';f.rooms[0].timeline={...f.savedTimeline,stage:'next',startedAt:now-10000,endsAt:now+20000,remainingSeconds:20,nextUntil:now+20000};f.emit('room:update',f.rooms[0])})
     check((await page.locator('.room-timeline [aria-current="step"] strong').textContent())==='观察续轮','next-round observation activates its own segment')
     check((await page.locator('.room-timeline .done').count())===2,'completed phases fill only their own segments')
-    await page.screenshot({path:path.join(output,'ui-task-next-round.png'),fullPage:true})
+    await capture(page,{path:path.join(output,'ui-task-next-round.png'),fullPage:true})
     await page.evaluate(()=>{const f=window.__fixture;f.rooms[0].phase='等待开奖';f.rooms[0].timeline=f.savedTimeline;f.emit('room:update',f.rooms[0])})
 
     await page.evaluate(()=>{
@@ -491,11 +531,11 @@ module.exports = async function verifyUI(config, output) {
     check((await page.locator('.reservation').nth(2).getByRole('progressbar').count())===0,'unknown timing has no fabricated progress')
     await page.setViewportSize({width:390,height:844})
     check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'five long-name candidates fit a narrow viewport')
-    await page.screenshot({path:path.join(output,'ui-running-mobile.png'),fullPage:true})
+    await capture(page,{path:path.join(output,'ui-running-mobile.png'),fullPage:true})
     await page.setViewportSize({width:1180,height:820})
     await page.getByLabel('界面语言').selectOption('en-US')
     check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'running dashboard fits English labels')
-    await page.screenshot({path:path.join(output,'ui-running-english.png'),fullPage:true})
+    await capture(page,{path:path.join(output,'ui-running-english.png'),fullPage:true})
     await page.getByLabel('Interface language').selectOption('zh-CN')
     await page.evaluate(()=>{const f=window.__fixture;f.state.candidates=f.savedCandidates;f.state.candidateCount=2;f.phase('running')})
     await page.evaluate(()=>{
@@ -513,7 +553,7 @@ module.exports = async function verifyUI(config, output) {
     check(await page.locator('.empty-state').getByRole('heading',{name:'等待定时结束',exact:true}).isVisible(),'terminal wait is distinct from planned rest')
     check((await page.locator('.control-deadline').textContent()).includes('定时结束'),'terminal wait shows stop time instead of resume countdown')
     check(await page.getByText('本轮已完成，等待定时结束',{exact:true}).first().isVisible(),'terminal wait explains no further round is expected')
-    await page.screenshot({path:path.join(output,'ui-waiting-scheduled-stop.png'),fullPage:true})
+    await capture(page,{path:path.join(output,'ui-waiting-scheduled-stop.png'),fullPage:true})
     await page.evaluate(()=>window.__fixture.phase('resting'))
 
     await page.evaluate(()=>{
@@ -607,7 +647,7 @@ module.exports = async function verifyUI(config, output) {
     await page.getByLabel('搜索房间', { exact: true }).blur()
     if(await page.getByRole('button',{name:'关闭提示',exact:true}).isVisible())await page.getByRole('button',{name:'关闭提示',exact:true}).click()
     await page.evaluate(()=>window.scrollTo(0,0))
-    await page.screenshot({ path: path.join(output, 'ui-library.png') })
+    await capture(page,{ path: path.join(output, 'ui-library.png') })
     await page.evaluate(() => {
       window.__fixture.insights.payments[0].state = 'unresolved'
       window.__fixture.insights.budget.spent = 6
@@ -619,6 +659,7 @@ module.exports = async function verifyUI(config, output) {
     })
     await nav('运行记录').click()
     await page.getByRole('heading', { name: '异常待办', exact: true }).waitFor({ timeout: 8000 })
+    check(await page.getByRole('list',{name:'异常处理步骤',exact:true}).isVisible(), 'issue workflow has explicit ordered steps')
     await nav('运行面板').click()
     check(
       await page.getByRole('button', { name: '手动参与', exact: true }).isDisabled(),
@@ -658,7 +699,7 @@ module.exports = async function verifyUI(config, output) {
     check(await page.locator('.payment-table').getByText('支付待核对',{exact:true}).isVisible(),'unresolved payments are not labelled successful')
     check(await page.locator('.payment-table').getByText('仍占用预算',{exact:true}).isVisible(),'pending charges still visibly occupy budget')
     await page.getByRole('button',{name:'参与记录',exact:true}).click()
-    await page.screenshot({ path: path.join(output, 'ui-records-review.png'), fullPage: true })
+    await capture(page,{ path: path.join(output, 'ui-records-review.png'), fullPage: true })
     await nav('运行日志').click()
     await page.evaluate(()=>{const f=window.__fixture;f.emit('log:add',{roomId:'system',time:Date.now(),message:'较早测试事件'});f.emit('log:add',{roomId:'system',time:Date.now(),message:'最新测试事件'})})
     check((await page.locator('.log-line p').first().textContent())==='最新测试事件','newest log is first even when timestamps match')
@@ -684,11 +725,11 @@ module.exports = async function verifyUI(config, output) {
         )
         if(size.width===390 && ['房间库','运行记录'].includes(destination)){
           await page.evaluate(()=>window.scrollTo(0,0))
-          await page.screenshot({path:path.join(output, destination==='房间库'?'ui-library-mobile.png':'ui-records-mobile.png'),fullPage:true})
+          await capture(page,{path:path.join(output, destination==='房间库'?'ui-library-mobile.png':'ui-records-mobile.png'),fullPage:true})
         }
       }
       await nav('运行面板').click()
-      await page.screenshot({ path: path.join(output, `ui-narrow-${size.width}.png`), fullPage: true })
+      await capture(page,{ path: path.join(output, `ui-narrow-${size.width}.png`), fullPage: true })
     }
     await page.setViewportSize({width:1180,height:820})
     await page.goto('https://fixture.local/?auth=unknown')
@@ -702,7 +743,7 @@ module.exports = async function verifyUI(config, output) {
     await page.getByRole('button',{name:'重置本轮预算',exact:true}).click()
     await page.getByRole('dialog').waitFor()
     check(await page.getByRole('dialog').getByText('每日已用同时归零',{exact:false}).isVisible(),'budget reset explains daily allowance')
-    await page.screenshot({path:path.join(output,'ui-budget-reset.png'),fullPage:true})
+    await capture(page,{path:path.join(output,'ui-budget-reset.png'),fullPage:true})
     await page.getByRole('dialog').getByRole('button',{name:'取消',exact:true}).click()
     check(!(await page.evaluate(()=>window.__fixture.calls.budgetReset)),'cancel keeps budget unchanged')
     await page.getByRole('button',{name:'重置本轮预算',exact:true}).click()
@@ -749,7 +790,7 @@ module.exports = async function verifyUI(config, output) {
     check(await page.locator('.report-facts').getByText('活跃 1.0 分钟',{exact:true}).isVisible(),'run report separates active time')
     check(await page.locator('.report-facts').getByText('未知 1',{exact:true}).isVisible(),'report retains unknown results')
     await page.evaluate(()=>window.scrollTo(0,0))
-    await page.screenshot({path:path.join(output,'ui-product-review.png'),fullPage:true})
+    await capture(page,{path:path.join(output,'ui-product-review.png'),fullPage:true})
     await page.getByLabel('记录状态',{exact:true}).selectOption('')
     await page.evaluate(()=>{
       const f=window.__fixture
@@ -773,7 +814,7 @@ module.exports = async function verifyUI(config, output) {
     check((await page.getByRole('row').count())===2,'payment tab preserves run scope')
     check(await page.locator('.payment-table').getByText('已确认扣款',{exact:true}).isVisible(),'payment ledger explicitly distinguishes confirmed spending')
     await page.evaluate(()=>window.scrollTo(0,0))
-    await page.screenshot({path:path.join(output,'ui-payments-focused.png'),fullPage:true})
+    await capture(page,{path:path.join(output,'ui-payments-focused.png'),fullPage:true})
 
     await page.getByLabel('运行范围',{exact:true}).selectOption('unassigned')
     check(await page.getByRole('heading',{name:'没有匹配的记录',exact:true}).isVisible(),'legacy scope does not infer newer payment ownership')
@@ -787,7 +828,7 @@ module.exports = async function verifyUI(config, output) {
     check(await page.locator('.decision-event').first().getByText('无法估计',{exact:false}).isVisible(),'missing probability remains unknown in decision details')
     await page.locator('.decision-event .record-evidence summary').first().click()
     await page.evaluate(()=>window.scrollTo(0,0))
-    await page.screenshot({path:path.join(output,'ui-decisions-focused.png'),fullPage:true})
+    await capture(page,{path:path.join(output,'ui-decisions-focused.png'),fullPage:true})
 
     await page.getByRole('button',{name:'参与记录',exact:true}).click()
     await page.getByLabel('运行范围',{exact:true}).selectOption('run')
@@ -804,12 +845,12 @@ module.exports = async function verifyUI(config, output) {
     check((await page.evaluate(()=>window.__fixture.calls.dismissAlert))===1,'popup can be dismissed')
     if(await page.getByRole('button',{name:'关闭提示',exact:true}).isVisible())await page.getByRole('button',{name:'关闭提示',exact:true}).click()
     await page.evaluate(()=>window.scrollTo(0,0))
-    await page.screenshot({path:path.join(output,'ui-records-focused.png'),fullPage:true})
+    await capture(page,{path:path.join(output,'ui-records-focused.png'),fullPage:true})
     for(const [tabName,file] of [['支出账本','ui-payments-focused.png'],['选择依据','ui-decisions-focused.png']]){
       await page.getByRole('button',{name:tabName,exact:true}).click()
       await page.mouse.move(0,0)
       await page.evaluate(()=>window.scrollTo(0,0))
-      await page.screenshot({path:path.join(output,file),fullPage:true,animations:'disabled'})
+      await capture(page,{path:path.join(output,file),fullPage:true,animations:'disabled'})
     }
     await page.getByRole('button',{name:'参与记录',exact:true}).click()
     await page.evaluate(()=>{const r=window.__fixture.insights.rounds[319];r.prizeType='diamond';r.prizeName=null;r.diamondAmount=0})
@@ -838,7 +879,7 @@ module.exports = async function verifyUI(config, output) {
     check(await page.locator('#extend-run').isVisible(),'extension preview opens separately from stop controls')
     await page.getByLabel('增加时长',{exact:true}).selectOption('15')
     const oldEnd=await page.evaluate(()=>window.__fixture.state.stopAt)
-    await page.screenshot({path:path.join(output,'ui-extend-run.png'),fullPage:true,animations:'disabled'})
+    await capture(page,{path:path.join(output,'ui-extend-run.png'),fullPage:true,animations:'disabled'})
     await page.getByRole('button',{name:'确认延长',exact:true}).click()
     await page.locator('#extend-run').waitFor({state:'hidden'})
     check((await page.evaluate(()=>window.__fixture.state.stopAt))===oldEnd+900000,'extension adds selected minutes to original deadline')

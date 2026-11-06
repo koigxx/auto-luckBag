@@ -166,6 +166,7 @@ async function recordAction(
 
 <template>
   <div class="app-shell">
+    <a class="skip-link" href="#main-content">{{ tr('跳转到主要内容', 'Skip to main content') }}</a>
     <aside class="sidebar">
       <div class="brand">
         <span class="brand-mark"><UiIcon name="gift" :size="24" /></span>
@@ -195,7 +196,7 @@ async function recordAction(
       <div class="sidebar-bottom">
         <div class="sidebar-status">
           <span class="status-dot" :class="{ online: running }" /><span>{{
-            running ? tr('计划执行中', 'Plan active') : tr('当前未运行', 'Currently stopped')
+            busy.stop ? tr('正在停止', 'Stopping') : busy.start ? tr('正在准备运行', 'Preparing run') : autoRunState?.status === 'resting' ? tr('计划休息中', 'Scheduled break') : running ? (autoRunState?.background ? tr('后台计划执行中', 'Background plan active') : tr('计划执行中', 'Plan active')) : tr('当前未运行', 'Currently stopped')
           }}</span>
         </div>
         <p>{{ tr('低频串行，按计划休息', 'One room at a time, with planned breaks') }}</p>
@@ -245,7 +246,7 @@ async function recordAction(
           </button>
         </div>
       </header>
-      <main id="main-content" class="main-content">
+      <main id="main-content" class="main-content" tabindex="-1">
         <div class="page-heading" :class="{'monitoring-heading': view === 'dashboard' && running}">
           <div>
             <h1>{{ tr(current.zh, current.en) }}</h1>
