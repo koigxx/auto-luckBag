@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { configDifferences } from '../../../shared/experience'
 import { computed, nextTick, ref, watch } from 'vue'
 import type { AppConfig } from '../types'
 import type { Policy } from '../../../shared/policy'
@@ -239,6 +240,18 @@ function selectType(type: 'all' | 'physical' | 'diamond', value: boolean) {
     draft.value.fudaiTypes.physical = false
     draft.value.fudaiTypes.diamond = false
   } else if (type !== 'all' && value) draft.value.fudaiTypes.all = false
+}
+const differences=computed(()=>configDifferences(JSON.parse(baseline.value),draft.value))
+function differenceLabel(key:string):string {
+  const field=fields.find(f=>`policy.${f.key}`===key)
+  if(field)return tr(field.zh,field.en)
+  const names:Record<string,[string,string]>={diamondBudget:['总钻石预算（钻）','Total budget (diamonds)'],allowDiamondProfit:['奖励再投入','Reward reinvestment'],debugLogs:['调试日志','Debug logs'],scanIntervalSeconds:['入口扫描间隔（秒）','Scan interval (seconds)'],enterBeforeSeconds:['任务准备窗口（秒）','Task window (seconds)'],candidatePoolLimit:['候选池上限','Candidate limit'],'fudaiTypes.all':['全部类型','All types'],'fudaiTypes.diamond':['钻石福袋','Diamond prizes'],'fudaiTypes.physical':['实物福袋','Physical prizes'],'policy.objective':['参与目标','Objective'],'policy.membership':['粉丝团付费策略','Membership policy'],'policy.allowedStart':['允许开始时间','Allowed start'],'policy.allowedEnd':['允许结束时间','Allowed end'],'policy.timezone':['运行时区','Time zone'],'policy.autoResume':['休息后恢复','Resume after break']}
+  return names[key]?tr(...names[key]):tr('其他策略选项','Other policy option')
+}
+function differenceValue(value:unknown):string {
+  if(typeof value==='boolean')return value?tr('开启','On'):tr('关闭','Off')
+  const values:Record<string,[string,string]>={opportunity:['参与机会','Participation opportunities'],physical:['实物优先','Physical'],diamond:['钻石优先','Diamonds'],existing:['仅已有资格','Existing only'],prefer:['优先复用','Reuse first'],whitelist:['仅许可主播','Permitted hosts']}
+  return typeof value==='string'&&values[value]?tr(...values[value]):String(value??'—')
 }
 async function invalid(group: string, message: string, id?: string) {
   section.value = group
@@ -652,6 +665,11 @@ async function save() {
         </section>
       </fieldset>
     </div>
+    <section v-if="dirty" class="settings-changes" :aria-label="tr('本次设置变更','Settings changes')">
+      <details open><summary>{{tr(`本次修改 ${differences.length} 项，保存后下次运行生效`,`${differences.length} changes; apply to the next run after saving`)}}</summary>
+      <ul><li v-for="change in differences" :key="change.key"><span>{{differenceLabel(change.key)}}</span><span><s>{{differenceValue(change.before)}}</s> → <strong>{{differenceValue(change.after)}}</strong></span></li></ul></details>
+      <p class="microcopy">{{tr('后台模式、发现入口和本次时长在启动面板单独选择，不随策略保存。','Background mode, discovery source and duration are chosen separately for each start.')}}</p>
+    </section>
     <footer class="settings-footer">
       <span :class="{ 'unsaved-label': dirty }"
         ><UiIcon :name="dirty ? 'info' : 'check'" :size="16" />{{

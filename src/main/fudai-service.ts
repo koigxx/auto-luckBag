@@ -44,6 +44,7 @@ export class FudaiService {
   private dom: LotteryDom
   private signal: AbortSignal
   private current: Opportunity | null = null
+  get observationLotteryId(): string | undefined { return this.current?.lotteryId || undefined }
   private settled = new Set<string>()
   private sent = new Set<string>()
   private actionWaits = new Map<string, number>()
@@ -190,7 +191,7 @@ export class FudaiService {
         if (!this.stopped && !this.signal.aborted && this.paymentId && this.paymentDispatched) {
           this.env.repository.payment(this.paymentId, 'unresolved')
           this.paymentId = null
-          this.env.reportRisk('付款确认过程异常，支付结果未明确，请核对账本', 'payment')
+          this.env.reportRisk('付款确认过程异常，支付结果未明确，请核对账本', 'payment', this.url)
         }
         throw error
       }
@@ -532,7 +533,7 @@ export class FudaiService {
       } catch (error) {
         this.env.repository.payment(payment.id, this.paymentDispatched ? 'unresolved' : 'failed')
         this.paymentId = null
-        if (this.paymentDispatched) this.env.reportRisk('支付操作结果未明确，请核对账本', 'payment')
+        if (this.paymentDispatched) this.env.reportRisk('支付操作结果未明确，请核对账本', 'payment', this.url)
         throw error
       }
       return
@@ -609,17 +610,28 @@ export class FudaiService {
         this.callbacks.onLog('支付回执超时，但同一福袋粉丝团任务已明确完成，按任务反馈兜底确认付款；不重复付款')
         return
       }
-      this.callbacks.onLog(`支付回执超时诊断：${this.observer.identityDiagnostics()}`)
+      // Fixed boolean fields only: do not retain raw panel text, commands or identities.
+      this.callbacks.onLog(`支付回执超时诊断：${JSON.stringify({
+        dispatched:this.paymentDispatched,
+        confirmationClicked:this.paymentConfirmedDialog,
+        neededPayment:o.membership==='needs-payment',
+        sameLatest:this.observer.latest?.lotteryId===o.lotteryId,
+        sameRights:this.observer.panelLotteryId===o.lotteryId,
+        panelReadable:!!panel.text,
+        panelIdentityConflict:!!panel.lotteryId&&panel.lotteryId!==o.lotteryId,
+        resultPanel:panel.resultPanel,
+        fanTaskCompleted:visibleFanTaskCompleted(panel.text)
+      })}；${this.observer.identityDiagnostics()}`)
       this.env.repository.payment(id, 'unresolved')
       this.paymentId = null
-      this.env.reportRisk('粉丝团支付结果未知，禁止重试，请核对后处理', 'payment')
+      this.env.reportRisk('粉丝团支付结果未知，禁止重试，请核对后处理', 'payment', this.url)
     }
   }
   private resolvePaymentReceipt(id: string, started: number): boolean {
     if (this.observer.lastFanSuccess >= started && this.observer.lastFanFailure >= started) {
       this.env.repository.payment(id, 'unresolved')
       this.paymentId = null
-      this.env.reportRisk('粉丝团支付回执冲突，请核对账本，禁止重试', 'payment')
+      this.env.reportRisk('粉丝团支付回执冲突，请核对账本，禁止重试', 'payment', this.url)
       return true
     }
     if (this.observer.lastFanSuccess >= started) {

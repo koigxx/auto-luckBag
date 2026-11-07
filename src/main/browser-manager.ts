@@ -1,5 +1,6 @@
 import { chromium, Browser, BrowserContext, Page, BrowserContextOptions } from 'playwright'
 import fs from 'fs'
+import { enableHiddenPages, installHiddenPages, restoreHiddenOrigins } from './hidden-pages'
 import { execution, assertActive, perform, onHalt } from './runtime'
 import { checkSignal } from './execution-gate'
 import { ROOM_NAVIGATION_TIMEOUT_SECONDS } from '../shared/policy'
@@ -69,8 +70,12 @@ export class BrowserManager {
   }
   private async getBrowser(): Promise<Browser> {
     if (!this.browser?.isConnected()) {
-      this.browser = await chromium.launch({ headless: this.background,
-      ...(fs.existsSync(chromium.executablePath())?(this.background?{channel:'chromium'}:{}):{channel:'msedge'}), args: ['--window-size=1440,900'] })
+      if(this.background)enableHiddenPages()
+      // Use the ordinary browser for both modes. Headless pages can appear
+      // logged in on the home page while the live room remains signed out.
+      this.browser = await chromium.launch({ headless: false,
+      ...(fs.existsSync(chromium.executablePath())?{}:{channel:'msedge'}),
+      args: ['--window-size=1440,900'] })
       const launched=this.browser
       launched.on('disconnected',()=>{if(this.browser!==launched)return;this.context=null;this.browser=null;if(!this.closing)this.disconnected()})
     }
@@ -81,8 +86,17 @@ export class BrowserManager {
     if (this.context) return this.context
     if (!this.creating) this.creating = (async () => {
       const browser = await this.getBrowser()
-      this.context = await browser.newContext({ viewport: { width: 1440, height: 900 }, locale: 'zh-CN',
-        storageState: this.carriedState ?? (this.storageStatePath && fs.existsSync(this.storageStatePath) ? this.storageStatePath : undefined) })
+      const saved=this.carriedState ?? (this.storageStatePath && fs.existsSync(this.storageStatePath) ? this.storageStatePath : undefined)
+      const state=typeof saved==='string'?JSON.parse(fs.readFileSync(saved,'utf8')):saved
+      const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, locale: 'zh-CN',
+        storageState:this.background && state ? {cookies:state.cookies,origins:[]} : state })
+      try {
+        if(this.background) {
+          await installHiddenPages(browser,context)
+          await restoreHiddenOrigins(context,state?.origins||[])
+        }
+        this.context=context
+      } catch(error) { await context.close().catch(()=>{}); throw error }
       this.carriedState = undefined
       return this.context
     })().finally(() => { this.creating = null })
@@ -94,6 +108,9 @@ export class BrowserManager {
     assertActive(signal, true)
     const page = await context.newPage()
     if (signal.aborted) { await page.close(); checkSignal(signal) }
+    try {
+      checkSignal(signal)
+    } catch(error) { await page.close().catch(()=>{}); throw error }
     this.pages.add(page)
     const close = () => { void page.close().catch(() => {}) }
     signal.addEventListener('abort', close, { once: true })
@@ -101,7 +118,10 @@ export class BrowserManager {
     return page
   }
   async navigate(page: Page, url: string, fresh: boolean, signal: AbortSignal): Promise<void> {
-    await perform(signal, () => page.goto(url, { waitUntil: 'domcontentloaded', timeout: ROOM_NAVIGATION_TIMEOUT_SECONDS * 1000 }), { url, fresh })
+    await perform(signal, async () => {
+      checkSignal(signal)
+      return page.goto(url, { waitUntil: 'domcontentloaded', timeout: ROOM_NAVIGATION_TIMEOUT_SECONDS * 1000 })
+    }, { url, fresh })
   }
   async closeManagedPages(): Promise<void> { await Promise.allSettled([...this.pages].map(p => p.close())); this.pages.clear() }
   async closeContext(): Promise<void> {

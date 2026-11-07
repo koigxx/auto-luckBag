@@ -2124,3 +2124,44 @@ input[aria-invalid='true'] { border-color: var(--error-text); }
   .idle-workspace .section-heading > button { grid-column: 1; grid-row: 3; justify-self: start; }
   .preference-presets { padding: 14px; }
 }
+
+/* Operational clarity: evidence, next actions and context stay close together. */
+.auth-diagnostics { margin-top: 14px; font-size: 12px; }
+.auth-diagnostics summary { color: var(--muted); padding: 6px 0; }
+.auth-diagnostics .button-row { margin-top: 12px; }
+.diagnostic-steps { list-style: none; padding: 0; margin: 10px 0; display: grid; gap: 8px; }
+.diagnostic-steps li { display: flex; justify-content: space-between; gap: 14px; }
+.diagnostic-steps strong { font-weight: 500; color: var(--muted); }
+.diagnostic-steps .passed { color: var(--green); }
+.diagnostic-steps .failed { color: var(--error-text); }
+.activity-explanation { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 24px; padding: 18px 22px; }
+.activity-explanation h3 { margin-top: 6px; }
+.activity-explanation p { color: var(--muted); font-size: 12px; line-height: 1.7; margin-top: 6px; overflow-wrap: anywhere; }
+.activity-explanation > small { grid-column: 1 / -1; color: var(--muted); }
+.settings-changes { grid-column: 1 / -1; padding: 18px 25px; border-top: 1px solid var(--border); background: var(--accent-soft); }
+.settings-changes summary { font-size: 13px; font-weight: 600; }
+.settings-changes ul { padding: 0; margin: 12px 0 0; list-style: none; display: grid; gap: 10px; }
+.settings-changes li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 24px; font-size: 12px; }
+.settings-changes s { color: var(--muted); text-decoration: none; }
+.run-review { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); }
+.run-review > .inline-link { margin-top: 12px; }
+.timing-list { display: grid; gap: 10px; margin-top: 16px; }
+.timing-list > div { display: grid; grid-template-columns: minmax(110px,1fr) minmax(60px,2fr) auto; align-items: center; gap: 14px; font-size: 12px; }
+.timing-list meter { width: 100%; height: 8px; }
+.timing-list meter::-webkit-meter-bar { background: var(--border); border: 0; border-radius: 4px; }
+.timing-list meter::-webkit-meter-optimum-value { background: var(--schedule); border-radius: 4px; }
+.timing-list strong { font-weight: 500; font-variant-numeric: tabular-nums; }
+.review-reasons { padding-left: 18px; font-size: 12px; color: var(--muted); line-height: 1.8; overflow-wrap: anywhere; }
+.log-context { padding: 18px 22px; background: var(--schedule-wash); display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; align-items: center; }
+.log-context strong { font-size: 14px; }
+.log-context p { color: var(--muted); font-size: 12px; line-height: 1.6; margin-top: 6px; }
+.window-help-link { margin-top: 8px; }
+.window-help { margin: 0; display: grid; gap: 18px; }
+.window-help dt { font-weight: 600; font-size: 14px; }
+.window-help dd { margin: 6px 0 0; color: var(--muted); font-size: 13px; line-height: 1.8; }
+@media(max-width: 640px) {
+  .activity-explanation { grid-template-columns: 1fr; padding: 16px; }
+  .timing-list > div { grid-template-columns: 1fr auto; gap: 6px; }
+  .timing-list meter { grid-row: 2; grid-column: 1 / -1; }
+  .settings-changes { padding: 16px; }
+}

@@ -19,7 +19,7 @@
   },
   "dependencies": {
     "electron-store": "^8.1.0",
-    "playwright": "^1.42.0",
+    "playwright": "1.59.1",
     "protobufjs": "^7.2.6"
   },
   "devDependencies": {

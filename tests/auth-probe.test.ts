@@ -31,7 +31,8 @@ test('hidden probe observes only page-generated evidence, closes pages, and hand
         await route.fulfill({contentType:'text/html',body: mode==='dom-connected'?dom:['no-evidence','abort','closed'].includes(mode)?'<p>Loading</p>':`<script>fetch('${self}')</script>`})
       })
       const controller=new AbortController()
-      const pending=probeSession(context,controller.signal,mode==='no-evidence'?150:3000)
+      const observations:string[]=[]
+      const pending=probeSession(context,controller.signal,mode==='no-evidence'?150:3000,event=>observations.push(event))
       if(mode==='abort')controller.abort()
       if(mode==='closed') {
         // A user/browser close should resolve without waiting for probe timeout.
@@ -39,6 +40,11 @@ test('hidden probe observes only page-generated evidence, closes pages, and hand
         await page.close()
       }
       assert.equal(await pending,['connected','dom-connected'].includes(mode)?'connected':mode==='expired'?'expired':'unknown')
+      if(['connected','dom-connected'].includes(mode))assert.ok(observations.includes('evidence'))
+      if(mode==='expired')assert.ok(observations.includes('expired'))
+      if(mode==='offline')assert.ok(observations.includes('page-error'))
+      if(mode==='abort')assert.deepEqual(observations,[])
+      if(mode==='closed')assert.ok(observations.includes('closed'))
       assert.equal(context.pages().length,0)
       assert.ok(visited.every(url=>url==='https://www.douyin.com/user/self'||url===self))
       await context.close()

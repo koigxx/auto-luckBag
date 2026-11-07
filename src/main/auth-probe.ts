@@ -1,3 +1,4 @@
+import { visiblePageRisk } from './page-risk'
 import type { BrowserContext, Response } from 'playwright'
 import { hasOwnProfileEntry } from './auth-dom'
 
@@ -26,7 +27,7 @@ export function selfResponseResult(url: string, status: number, body: any): Prob
     (typeof id === 'number' && Number.isSafeInteger(id) && id > 0) ? 'connected' : 'unknown'
 }
 
-export async function probeSession(context: BrowserContext, signal: AbortSignal, timeoutMs = 15000): Promise<ProbeResult> {
+export async function probeSession(context: BrowserContext, signal: AbortSignal, timeoutMs = 15000, observe?: (event: 'page-ready' | 'page-error' | 'evidence' | 'expired' | 'challenge' | 'closed') => void): Promise<ProbeResult> {
   if (signal.aborted) return 'unknown'
   const page = await context.newPage()
   let result: ProbeResult = 'unknown'
@@ -34,12 +35,13 @@ export async function probeSession(context: BrowserContext, signal: AbortSignal,
   const evidence = new Promise<ProbeResult>(resolve => { finish = resolve })
   let closed = false
   const abort = () => { finish('unknown'); void page.close().catch(() => {}) }
-  const onClose = () => { closed = true; finish('unknown') }
+  const report = (event: Parameters<NonNullable<typeof observe>>[0]) => { if(!closed && !signal.aborted)observe?.(event) }
+  const onClose = () => { report('closed'); closed = true; finish('unknown') }
   const listener = async (response: Response) => {
     try {
       if (!isSelfResponse(response.url())) return
       const verdict = selfResponseResult(response.url(), response.status(), await response.json().catch(() => null))
-      if (!closed && !signal.aborted && verdict !== 'unknown') { result = verdict; finish(verdict) }
+      if (!closed && !signal.aborted && verdict !== 'unknown') { report(verdict==='connected'?'evidence':'expired'); result = verdict; finish(verdict) }
     } catch { /* Invalid/unrelated responses provide no authentication evidence. */ }
   }
   page.on('response', listener)
@@ -51,14 +53,15 @@ export async function probeSession(context: BrowserContext, signal: AbortSignal,
     if (closed || signal.aborted || reading) return
     reading = true
     try {
-      if (await hasOwnProfileEntry(page) && !closed && !signal.aborted && result !== 'expired') finish('connected')
+      if(await visiblePageRisk(page).catch(()=>''))report('challenge')
+      if (await hasOwnProfileEntry(page) && !closed && !signal.aborted && result !== 'expired') { report('evidence'); finish('connected') }
     } finally { reading = false }
   }, 500)
   try {
     if (signal.aborted) return 'unknown'
     // Public normal page, not a private API call or replay. No login interaction.
     void page.goto('https://www.douyin.com/user/self', { waitUntil: 'domcontentloaded', timeout: timeoutMs })
-      .catch(() => finish(result))
+      .then(() => report('page-ready')).catch(() => { report('page-error'); finish(result) })
     return await evidence
   } finally {
     closed = true

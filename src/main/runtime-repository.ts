@@ -1,3 +1,4 @@
+import { sampleTiming, type ActivityKind } from '../shared/experience'
 import { AccountData, DEFAULT_POLICY, DecisionRecord, emptySession, Membership, Opportunity, Payment, Policy, RoomProfile, RoundRecord, RuntimeData, UserAlert, normalizeRoomUrl, riskId } from '../shared/policy'
 
 export interface RuntimeStorage { read(): RuntimeData; write(data: RuntimeData): void }
@@ -217,6 +218,9 @@ export class RuntimeRepository {
     const run=a.runs?.find(r=>r.endedAt===null)
     if(run && d.action==='skip')run.skipReasons[d.reason]=(run.skipReasons[d.reason]||0)+1
   }) }
+  sampleActivity(kind: ActivityKind): void {
+    this.change(a => { const r=a.runs?.find(r=>r.endedAt===null); if(r)r.activityTiming=sampleTiming(r.activityTiming,kind,this.now()) })
+  }
   beginRun(source: string): void {
     this.change(a=>{
       if(a.runs?.some(r=>r.endedAt===null))throw new Error('上次运行尚未完成收尾')
@@ -229,6 +233,7 @@ export class RuntimeRepository {
     this.change(a=>{
       const r=a.runs?.find(r=>r.endedAt===null);if(!r)return
       r.silentEnd=Object.values(a.payments).some(p=>p.state==='unresolved')||a.risks.some(r=>r.source==='payment'&&r.resolvedAt===null)
+      if(r.activityTiming)r.activityTiming=sampleTiming(r.activityTiming,'stopped',this.now())
       r.endedAt=this.now();r.reason=reason
       r.activeMs=Math.max(0,Object.values(a.session.activeByDay).reduce((s,n)=>s+n,0)-r.activeBaseline)
     })

@@ -1,4 +1,6 @@
 import { visiblePageRisk } from './page-risk'
+import { hasLiveLoginPrompt, LIVE_LOGIN_REQUIRED } from './auth-dom'
+import { setTimeout as delay } from 'node:timers/promises'
 import { Page, Request, Response, WebSocket } from 'playwright'
 import { Opportunity } from '../shared/policy'
 import { parseLottery, parseLotteryPayload, panelIdentity, riskFromText } from './lottery-parser'
@@ -193,9 +195,23 @@ export class PassiveObserver {
     this.frames.set(ws,handler);ws.on('framereceived',handler)
   }
   async checkPageRisk(): Promise<void> {
-    if (!this.alive || this.signal.aborted || this.page.isClosed()) return
-    const reason = await visiblePageRisk(this.page).catch(()=>'')
-    if(reason && this.alive && !this.signal.aborted)this.reportRisk(reason,'visible-challenge',this.page.url())
+    // Initial room rendering may precede session hydration. Hold the caller
+    // here (no task dispatch) while verifying the prompt, rather than treating
+    // one early frame as permanent expiry or letting tasks run during a grace period.
+    const until=Date.now()+3000
+    while(this.alive&&!this.signal.aborted&&!this.page.isClosed()) {
+      const reason=await visiblePageRisk(this.page).catch(()=>'')
+      if(reason) {
+        if(this.alive&&!this.signal.aborted)this.reportRisk(reason,'visible-challenge',this.page.url())
+        return
+      }
+      if(!await hasLiveLoginPrompt(this.page).catch(()=>false))return
+      if(Date.now()>=until) {
+        if(this.alive&&!this.signal.aborted)this.reportRisk(LIVE_LOGIN_REQUIRED,'login',this.page.url())
+        return
+      }
+      await delay(250,undefined,{signal:this.signal}).catch(error=>{if(!this.signal.aborted)throw error})
+    }
   }
 
   close = (): void => {

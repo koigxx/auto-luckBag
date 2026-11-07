@@ -1,3 +1,4 @@
+import { runStatusLabel } from '../shared/experience'
 import { app, BrowserWindow, Menu, Tray, nativeImage, shell } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
@@ -103,15 +104,15 @@ function setupTray(): void {
   let previousStatus=''
   const updateTray=()=>{
     const state=autoRunner.getState()
-    const labels:Record<string,string>={running:'运行中',draining:'收尾中',resting:'休息中','resume-check':'恢复检查',blocked:'异常已停止',stopped:'已停止'}
-    const status=labels[state.status]||state.status
-    if(previousStatus===status)return
-    previousStatus=status
+    const status=runStatusLabel(state.status,state.background,store.get('language')==='en-US')
+    const key=`${status}:${!!state.session.finishRequested}`
+    if(previousStatus===key)return
+    previousStatus=key
     tray?.setToolTip(`福袋助手 · ${status}`)
     tray?.setContextMenu(Menu.buildFromTemplate([
       {label:`当前：${status}`,enabled:false},
       {label:'显示窗口',click:()=>{mainWindow?.show();mainWindow?.focus()}},
-      {label:'收尾后停止',enabled:state.running,click:()=>{void autoRunner.finishCurrent()}},
+      {label:state.session.finishRequested?'正在等待本轮结束':'收尾后停止',enabled:state.running&&!state.session.finishRequested,click:()=>{void autoRunner.finishCurrent()}},
       {label:'立即停止',enabled:state.running,click:()=>{void autoRunner.stop()}},
       {type:'separator'},
       {label:'退出',click:()=>{isQuitting=true;app.quit()}}

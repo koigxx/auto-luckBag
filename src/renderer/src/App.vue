@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { runStatusLabel, type LogContext } from '../../shared/experience'
 import { computed, ref, watch } from 'vue'
 import { useIpc } from './composables/useIpc'
 import { normalizeRoomUrl } from '../../shared/policy'
@@ -15,6 +16,7 @@ const {
   ready,
   isLoggedIn,
   authState,
+  authDiagnostics,
   checkLogin,
   rooms,
   config,
@@ -42,6 +44,10 @@ const {
 } = useIpc()
 type View = 'dashboard' | 'settings' | 'library' | 'records' | 'logs'
 const view = ref<View>('dashboard')
+const windowHelp = ref(false)
+const logContext = ref<LogContext | null>(null)
+function openLogs(context: LogContext) { logContext.value={...context};view.value='logs' }
+watch(isLoggedIn, connected=>{if(!connected)logContext.value=null})
 watch(alertDestination,kind=>{if(kind){view.value=kind==='login'?'dashboard':'records';alertDestination.value=''}})
 const dirty = ref(false)
 const manualOpen = ref(false)
@@ -196,7 +202,7 @@ async function recordAction(
       <div class="sidebar-bottom">
         <div class="sidebar-status">
           <span class="status-dot" :class="{ online: running }" /><span>{{
-            busy.stop ? tr('正在停止', 'Stopping') : busy.start ? tr('正在准备运行', 'Preparing run') : autoRunState?.status === 'resting' ? tr('计划休息中', 'Scheduled break') : running ? (autoRunState?.background ? tr('后台计划执行中', 'Background plan active') : tr('计划执行中', 'Plan active')) : tr('当前未运行', 'Currently stopped')
+            busy.stop ? tr('正在停止', 'Stopping') : busy.start ? tr('正在准备运行', 'Preparing run') : runStatusLabel(autoRunState?.status || 'stopped', !!autoRunState?.background, language==='en-US')
           }}</span>
         </div>
         <p>{{ tr('低频串行，按计划休息', 'One room at a time, with planned breaks') }}</p>
@@ -210,6 +216,7 @@ async function recordAction(
           ><UiIcon name="chevron" :size="14" /><strong>{{ tr(current.zh, current.en) }}</strong>
         </div>
         <div class="account-actions">
+          <button class="icon-button" :aria-label="tr('窗口与后台说明','Window and background help')" :title="tr('窗口与后台说明','Window and background help')" @click="windowHelp=true"><UiIcon name="info" :size="18" /></button>
           <button
             v-if="running || busy.start || busy.addRoom"
             class="button stop small"
@@ -287,6 +294,8 @@ async function recordAction(
         <template v-else>
           <RunDashboard
             :auth-state="authState"
+            :auth-diagnostics="authDiagnostics"
+            @window-help="windowHelp=true"
             @check-login="checkLogin"
             v-show="view === 'dashboard'"
             :config="config"
@@ -333,11 +342,14 @@ async function recordAction(
             :on-action="recordAction"
             :on-reset="resetRunStats"
             @login="login"
+            @logs="openLogs"
             @add="openManual"
           />
           <ActivityLog
             v-show="view === 'logs'"
             :logs="logs"
+            :context="logContext"
+            @clear-context="logContext=null"
             :rooms="rooms"
             :language="language"
             @clear="logs = []"
@@ -358,6 +370,11 @@ async function recordAction(
       <strong>{{ alerts[0].title }}</strong><p>{{ alerts[0].message }}</p>
       <button class="button small" @click="view=alerts[0].kind==='login'?'dashboard':'records';dismissAlert(alerts[0].id)">{{ alerts[0].kind==='login'?tr('返回登录','Sign in'):alerts[0].kind==='risk'?tr('查看异常待办','View issue'):tr('查看记录','View records') }}</button>
     </aside>
+    <UiDialog :open="windowHelp" :title="tr('窗口与后台运行','Windows and background running')" @close="windowHelp=false">
+      <dl class="window-help"><div><dt>{{tr('后台运行','Background run')}}</dt><dd>{{tr('普通浏览器使用隐藏任务页面，运行中不开窗、不反复最小化；首次准备时可能短暂显示空白窗口。登录或人工验证仍由你主动打开。','Uses hidden task pages in the regular browser, without opening or minimizing task windows. Initial preparation may briefly show a blank window. Open sign-in or verification manually.')}}</dd></div><div><dt>{{tr('关闭主窗口','Close main window')}}</dt><dd>{{tr('仅隐藏到托盘，当前计划继续执行，包括计划休息。可从托盘重新显示窗口。','Hides to the tray. The plan continues, including breaks. Reopen from the tray.')}}</dd></div><div><dt>{{tr('最小化','Minimize')}}</dt><dd>{{tr('收起主窗口，不停止任务，也不改变任务浏览器模式。','Minimizes the app without stopping tasks or changing browser mode.')}}</dd></div><div><dt>{{tr('退出应用','Quit app')}}</dt><dd>{{tr('从菜单或托盘退出会停止任务并清理工作页面。重开应用不会自动运行。','Quitting via menu or tray stops tasks and closes work pages. Reopening never starts a run automatically.')}}</dd></div></dl>
+      <p class="microcopy">{{tr('运行时电脑需保持唤醒。检测到休眠或时钟异常时会停止，需检查后手动启动。','Keep the computer awake. Detected suspend or clock anomalies stop the run and require a manual restart.')}}</p>
+      <template #footer><button class="button" @click="windowHelp=false">{{tr('知道了','Got it')}}</button></template>
+    </UiDialog>
     <UiDialog
       :open="manualOpen"
       :title="tr('手动参与直播间', 'Join a room')"

@@ -1,8 +1,11 @@
 <script setup lang="ts">
+import RunReview from './RunReview.vue'
+import type { LogContext } from '../../../shared/experience'
 import {computed,ref} from 'vue'
 import type {Insights} from '../../../shared/insights'
 import OutcomeBar from './OutcomeBar.vue'
 const props=defineProps<{data:Insights;language:string;part:'claims'|'history';busy:Record<string,boolean>;onAction:(key:string,fn:()=>Promise<{success:boolean;error?:string}>)=>Promise<boolean|null>}>()
+const emit=defineEmits<{logs:[context:LogContext]}>()
 const tr=(zh:string,en:string)=>props.language==='en-US'?en:zh
 const allClaims=ref(false),reportPage=ref(1)
 const pending=computed(()=>props.data.rounds.filter(r=>r.result==='won'&&r.confirmedAt!=null&&r.prizeType!=='diamond'&&!r.claimed).length)
@@ -34,7 +37,7 @@ const api=window.api
           <OutcomeBar :won="r.won" :lost="r.lost" :unknown="r.unknown" :pending="r.pending" :language="language" />
           <p class="microcopy">{{tr('结束','Ended')}} {{time(r.endedAt)}} · {{tr('预算轮次','Budget cycle')}} {{r.budgetCycle+1}} · {{r.source}}</p>
           <div class="report-facts"><span>{{tr('活跃','Active')}} {{(r.activeMs/60000).toFixed(1)}} {{tr('分钟','minutes')}}</span><span v-if="r.endedAt!==null">{{tr('总历时','Elapsed')}} {{((r.endedAt-r.startedAt)/60000).toFixed(1)}} {{tr('分钟','minutes')}}</span><span>{{tr('确认','Confirmed')}} {{r.confirmed}}</span><span>{{tr('中奖','Won')}} {{r.won}}</span><span>{{tr('未中奖','Not won')}} {{r.lost}}</span><span>{{tr('未知','Unknown')}} {{r.unknown}}</span><span>{{tr('待结束','Pending')}} {{r.pending}}</span><span>{{tr('支出','Spent')}} {{r.spent}} / {{tr('占额','Reserved')}} {{r.reserved}} {{tr('钻','diamonds')}}</span></div>
-          <p v-for="(count,reason) in r.skipReasons" :key="reason" class="microcopy">{{tr('跳过','Skipped')}} {{count}} {{tr('次','times')}}：{{reason}}</p>
+<RunReview :report="r" :language="language" @logs="emit('logs',$event)" />
         </details>
         <div v-if="reports.length>10" class="button-row"><button class="button small" :disabled="reportPage<=1" @click="reportPage--">{{tr('上页报告','Previous reports')}}</button><span>{{reportPage}}</span><button class="button small" :disabled="reportPage*10>=reports.length" @click="reportPage++">{{tr('下页报告','Next reports')}}</button></div>
       </div>

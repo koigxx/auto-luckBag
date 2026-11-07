@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import type { LogContext } from '../../../shared/experience'
+import RunReview from './RunReview.vue'
 import { riskId } from '../../../shared/policy'
 import { computed, ref, watch } from 'vue'
 import type { Insights } from '../../../shared/insights'
@@ -23,8 +25,15 @@ const props = defineProps<{
   ) => Promise<boolean | null>
   onReset: () => Promise<boolean | null>
 }>()
+function roundLogs(round: import('../../../shared/policy').RoundRecord) {
+  emit('logs',{runId:round.runId,roomUrl:round.roomUrl,lotteryId:round.lotteryId,from:round.createdAt-60000,to:Math.max(round.updatedAt,round.drawAt||round.updatedAt)+60000})
+}
+function paymentLogs(payment: Payment) {
+  const round=props.data?.rounds.find(r=>r.key===payment.roundKey)
+  emit('logs',{runId:payment.runId,roomUrl:payment.roomUrl,lotteryId:round?.lotteryId,from:payment.at-60000,to:Math.max(payment.at,payment.confirmedAt||payment.at)+300000})
+}
 const api = window.api
-const emit = defineEmits<{ login: []; add: [] }>()
+const emit = defineEmits<{ login: []; add: []; logs: [context: LogContext] }>()
 const tr = (zh: string, en: string) => (props.language === 'en-US' ? en : zh)
 const runFilter = ref('')
 const tab = ref('rounds')
@@ -159,7 +168,7 @@ async function confirm() {
 </script>
 
 <template>
-  <section v-if="!loggedIn" class="surface empty-state page-empty">
+  <section v-if="!loggedIn && !data" class="surface empty-state page-empty">
     <span class="empty-icon"><UiIcon :name="view === 'library' ? 'rooms' : 'records'" :size="30" /></span>
     <h2>{{ tr('连接账号后查看记录', 'Connect to view your records') }}</h2>
     <p>
@@ -188,6 +197,7 @@ async function confirm() {
       <OutcomeBar :won="totals.won" :lost="totals.lost" :unknown="totals.unknown" :pending="totals.pending" :language="language" />
       <p v-if="unconfirmedOutcomes" class="microcopy">{{tr(`分布中包含 ${unconfirmedOutcomes} 条尚未确认参与的记录；未知结果不代表未中奖。`, `Distribution includes ${unconfirmedOutcomes} records without confirmed participation. Unknown is not a loss.`)}}</p>
       <p v-if="selectedRun" class="microcopy">{{ tr('活跃','Active') }} {{ (selectedRun.activeMs/60000).toFixed(1) }} {{tr('分钟','minutes')}} · {{tr('结束','Ended')}} {{selectedRun.endedAt===null?'—':time(selectedRun.endedAt)}} · {{tr('预算轮次','Budget cycle')}} {{selectedRun.budgetCycle+1}}</p>
+      <RunReview v-if="selectedRun" :report="selectedRun" :language="language" @logs="emit('logs',$event)" />
     </section>
     <ReviewSummary part="claims" :data="data" :busy="busy" :on-action="onAction" :language="language" />
       <section v-if="unresolved.length || risks.length" class="review-panel" aria-labelledby="review-title">
@@ -213,6 +223,7 @@ async function confirm() {
               }}
             </p>
             <small>{{ time(payment.at) }}</small>
+            <button class="inline-link" @click="paymentLogs(payment)">{{tr('查看关联日志','View linked logs')}}</button>
           </div>
           <div class="button-row">
             <button
@@ -233,9 +244,11 @@ async function confirm() {
         <div v-for="risk in risks" :key="riskId(risk)" class="review-row">
           <div>
             <strong>{{ risk.reason }}</strong>
+            <button class="inline-link" @click="emit('logs',{roomUrl:risk.url,from:risk.at-300000,to:risk.at+300000})">{{tr('查看异常前后日志','View surrounding logs')}}</button>
             <p>{{ time(risk.at) }} · {{ tr('自动运行已停止，等待人工处理', 'Automation stopped; manual handling required') }}</p>
             <p v-if="riskFeedback[riskId(risk)]" role="status">{{ riskFeedback[riskId(risk)] }}</p>
-            <p v-else>{{ tr('先前往浏览器完成验证并保持页面打开，再检查；未通过时会在此显示原因。','Open the browser, complete verification and keep it open, then check. Errors appear here.') }}</p>
+            <p v-else-if="risk.source==='login'">{{ tr('当前任务浏览器未登录。请前往浏览器确认直播间登录正常，保持页面打开，再点击检查；处理后仍需手动启动。','The task browser is signed out. Open it, confirm that the live room is signed in, keep it open, then check. Restart manually after resolving this issue.') }}</p>
+            <p v-else>{{ risk.source==='payment' ? tr('先核对抖音实际扣款记录，并在上方确认这笔支付结果，再检查完成异常；打开浏览器或关闭提醒不会解除占额。','Verify the actual charge in Douyin and reconcile the payment above before completing this issue. Opening the browser or dismissing a notice does not release held funds.') : tr('先前往浏览器完成验证并保持页面打开，再检查；未通过时会在此显示原因。','Open the browser, complete verification and keep it open, then check. Errors appear here.') }}</p>
             <p v-if="running">{{ tr('请等待自动任务停止后再处理。','Wait for automation to stop.') }}</p>
           </div>
           <div class="button-row">
@@ -309,7 +322,7 @@ async function confirm() {
           <thead><tr><th>{{tr('直播间与开奖时间','Room and draw')}}</th><th>{{tr('参与与结果','Entry and result')}}</th><th>{{tr('中奖奖励','Won reward')}}</th></tr></thead>
           <tbody><tr v-for="round in filteredRounds.slice(start,start+15)" :key="round.key">
             <td :data-label="tr('直播间与开奖时间','Room and draw')"><strong class="cell-title">{{name(round.roomUrl)}}</strong><small>{{tr('开奖','Draw')}} {{time(round.drawAt)}}</small>
-              <details class="record-evidence"><summary>{{tr('参与详情','Entry details')}}</summary><dl><div><dt>{{tr('提交时间','Submitted')}}</dt><dd>{{time(round.submittedAt)}}</dd></div><div><dt>{{tr('确认时间','Confirmed')}}</dt><dd>{{time(round.confirmedAt)}}</dd></div><div><dt>{{tr('福袋编号','Bag ID')}}</dt><dd>{{round.lotteryId}}</dd></div></dl><p class="record-address">{{round.roomUrl}}</p></details>
+              <details class="record-evidence"><summary>{{tr('参与详情','Entry details')}}</summary><dl><div><dt>{{tr('提交时间','Submitted')}}</dt><dd>{{time(round.submittedAt)}}</dd></div><div><dt>{{tr('确认时间','Confirmed')}}</dt><dd>{{time(round.confirmedAt)}}</dd></div><div><dt>{{tr('福袋编号','Bag ID')}}</dt><dd>{{round.lotteryId}}</dd></div></dl><p class="record-address">{{round.roomUrl}}</p><button class="inline-link" @click="roundLogs(round)">{{tr('查看本轮日志','View round logs')}}</button></details>
             </td>
             <td :data-label="tr('参与与结果','Entry and result')"><span class="status-pill" :class="round.result==='won'?'success':round.result==='unknown'?'warning':'neutral'">{{label(round.result)}}</span><small class="entry-confirmation" :class="{confirmed:round.confirmedAt!=null}">{{round.confirmedAt!=null?tr('已确认参与','Participation confirmed'):round.submittedAt!=null?tr('已提交，参与未确认','Submitted; participation unconfirmed'):tr('未确认参与','Participation unconfirmed')}}</small></td>
             <td :data-label="tr('中奖奖励','Won reward')">
@@ -321,7 +334,7 @@ async function confirm() {
         <table v-else class="record-table payment-table" role="table">
           <thead><tr><th>{{tr('直播间与用途','Room and purpose')}}</th><th>{{tr('支付金额','Payment amount')}}</th><th>{{tr('账本状态','Ledger status')}}</th></tr></thead>
           <tbody><tr v-for="payment in filteredPayments.slice(start,start+15)" :key="payment.id">
-            <td :data-label="tr('直播间与用途','Room and purpose')"><strong class="cell-title">{{name(payment.roomUrl)}}</strong><small>{{payment.newClub?tr('新开粉丝团','New membership'):tr('再次点亮','Relight')}} · {{time(payment.at)}}</small><details class="record-evidence"><summary>{{tr('支付详情','Payment details')}}</summary><dl><div><dt>{{tr('记录创建时间','Recorded')}}</dt><dd>{{time(payment.at)}}</dd></div><div><dt>{{tr('确认扣款时间','Charge confirmed')}}</dt><dd>{{time(payment.confirmedAt)}}</dd></div><div><dt>{{tr('预算轮次','Budget cycle')}}</dt><dd>{{(payment.budgetCycle??0)+1}}</dd></div><div><dt>{{tr('本地支付编号','Local payment ID')}}</dt><dd>{{payment.id}}</dd></div></dl><p class="record-address">{{payment.roomUrl}}</p></details></td>
+            <td :data-label="tr('直播间与用途','Room and purpose')"><strong class="cell-title">{{name(payment.roomUrl)}}</strong><small>{{payment.newClub?tr('新开粉丝团','New membership'):tr('再次点亮','Relight')}} · {{time(payment.at)}}</small><details class="record-evidence"><summary>{{tr('支付详情','Payment details')}}</summary><dl><div><dt>{{tr('记录创建时间','Recorded')}}</dt><dd>{{time(payment.at)}}</dd></div><div><dt>{{tr('确认扣款时间','Charge confirmed')}}</dt><dd>{{time(payment.confirmedAt)}}</dd></div><div><dt>{{tr('预算轮次','Budget cycle')}}</dt><dd>{{(payment.budgetCycle??0)+1}}</dd></div><div><dt>{{tr('本地支付编号','Local payment ID')}}</dt><dd>{{payment.id}}</dd></div></dl><p class="record-address">{{payment.roomUrl}}</p><button class="inline-link" @click="paymentLogs(payment)">{{tr('查看关联日志','View linked logs')}}</button></details></td>
             <td :data-label="tr('支付金额','Payment amount')"><strong class="ledger-amount" :class="{settled:payment.state==='confirmed'}">{{payment.cost}} <small>{{tr('钻','diamonds')}}</small></strong><small>{{payment.state==='confirmed'?tr('计入已用预算','Counts as spent'):payment.state==='failed'?tr('不占用预算','No budget held'):tr('仍占用预算','Budget remains held')}}</small></td>
             <td :data-label="tr('账本状态','Ledger status')"><span class="status-pill" :class="payment.state==='confirmed'?'success':payment.state==='unresolved'?'warning':'neutral'">{{paymentLabel(payment.state)}}</span><small v-if="payment.state==='unresolved'">{{tr('请在上方异常区核对实际扣款','Verify the actual charge in the review section above')}}</small></td>
           </tr></tbody>
@@ -339,7 +352,7 @@ async function confirm() {
         </div>
       </footer>
     </section>
-    <ReviewSummary part="history" :data="data" :busy="busy" :on-action="onAction" :language="language" />
+    <ReviewSummary v-if="!selectedRun" @logs="emit('logs',$event)" part="history" :data="data" :busy="busy" :on-action="onAction" :language="language" />
     <p class="microcopy">
       {{
         tr(

@@ -18,6 +18,9 @@ export interface RoomInfo {
 export type { AppConfig, FudaiTypes, RunStats } from '../../../shared/config'
 
 export interface LogEntry {
+  runId?: string
+  roomUrl?: string
+  lotteryId?: string
   roomId: string
   roomName?: string
   message: string
@@ -65,6 +68,7 @@ export type AutoRunStatus =
   | 'blocked'
 
 export interface AutoRunState {
+  activity?: import('../../../shared/experience').ActivityObservation
   background?: boolean
   automatic?: boolean
   waitingReason?: string

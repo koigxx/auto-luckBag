@@ -17,7 +17,15 @@ import { dayKey } from './runtime-repository'
 
 export function setupIpcHandlers(win:BrowserWindow,_browser:BrowserManager,auth:AuthService,rooms:RoomManager,discovery:DiscoveryService,stats:StatsService,runner:AutoRunner):void {
   const send=(channel:string,data:unknown)=>{if(!win.isDestroyed())win.webContents.send(channel,data)}
-  const log=(roomId:string,message:string)=>send('log:add',{roomId,roomName:rooms.getRoom(roomId)?roomDisplayName(rooms.getRoom(roomId)!.name,rooms.getRoom(roomId)!.url):undefined,message,time:Date.now()})
+  const log=(roomId:string,message:string)=>{
+    const room=rooms.getRoom(roomId), lotteryId=room?.fudaiService?.observationLotteryId
+    const account=repository.read().activeAccount?repository.account():undefined
+    const round=room&&lotteryId?account?.rounds[repository.roundKey(room.url,lotteryId)]:undefined
+    // A late result remains attached to its original run; legacy ownership stays unknown.
+    const runId=round?round.runId:account?.runs?.find(r=>r.endedAt===null)?.id
+    send('log:add',{roomId,runId,roomUrl:room?.url,lotteryId,roomName:room?roomDisplayName(room.name,room.url):undefined,message,time:Date.now()})
+  }
+  auth.setStatusListener(status=>send('auth:update',status))
   setExecutionLogger(message=>log('auto',message))
   rooms.setCallbacks(r=>send('room:update',rooms.getRoomPublicInfo(r.id)),log,(_room,result)=>stats.recordParticipation(result),id=>send('room:removed',id))
   discovery.setLogger(m=>log('discover',m));stats.setOnUpdate(s=>send('run-stats:update',s));runner.setCallbacks(m=>log('auto',m),s=>send('auto-run:update',s))

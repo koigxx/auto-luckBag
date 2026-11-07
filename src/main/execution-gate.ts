@@ -69,6 +69,13 @@ export function delay(ms: number, signal: AbortSignal): Promise<void> {
 /** One queue for every side effect. Cancellation is checked again after every await. */
 export class ExecutionGate {
   private controller = new AbortController()
+  private observation: { signal: AbortSignal; until: number; kind: 'navigation' | 'action' } | null = null
+  get waitObservation() { return this.observation?.signal === this.signal && !this.signal.aborted ? this.observation : null }
+  observeWait(signal: AbortSignal, until: number, kind: 'navigation' | 'action'): () => void {
+    const observation = {signal,until,kind}
+    this.observation = observation
+    return () => { if(this.observation === observation)this.observation = null }
+  }
   private chain: Promise<unknown> = Promise.resolve()
   constructor() {
     this.controller.abort()

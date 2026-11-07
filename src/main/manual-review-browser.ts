@@ -1,5 +1,6 @@
 import type { BrowserContext, Page } from 'playwright'
 import { visiblePageRisk } from './page-risk'
+import { hasLiveLoginPrompt, LIVE_LOGIN_REQUIRED } from './auth-dom'
 
 // This page has no task observer, execution gate or automatic input handlers.
 export class ManualReviewBrowser {
@@ -44,6 +45,7 @@ export class ManualReviewBrowser {
     if(url.protocol!=='https:' || !(url.hostname==='douyin.com'||url.hostname.endsWith('.douyin.com')))
       throw new Error('请在抖音页面完成处理')
     if(await visiblePageRisk(this.manualPage))throw new Error('页面仍显示验证或异常，请完成后再检查')
+    if(await hasLiveLoginPrompt(this.manualPage))throw new Error(LIVE_LOGIN_REQUIRED)
   }
   async closeManualReview():Promise<void> {
     await this.openingManual?.catch(()=>{})

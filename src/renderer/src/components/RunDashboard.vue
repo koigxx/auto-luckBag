@@ -5,6 +5,8 @@ import type { AutoRunOptions } from '../../../shared/run-options'
 import type { AppConfig, AutoRunState, RoomInfo, RunStats, Stats } from '../types'
 import type { Insights } from '../../../shared/insights'
 import UiIcon from './UiIcon.vue'
+import AuthDiagnostics from './AuthDiagnostics.vue'
+import { activityLabel, nextActionLabel } from '../../../shared/experience'
 import OutcomeBar from './OutcomeBar.vue'
 import RoomStageTimeline from './RoomStageTimeline.vue'
 import { roomDisplayName } from '../../../shared/record-presentation'
@@ -13,6 +15,7 @@ import { returnProgress } from '../../../shared/display-progress'
 const props = defineProps<{
   config: AppConfig
   loggedIn: boolean
+  authDiagnostics?: import('../../../shared/auth').AuthDiagnostics
   authState?: import('../../../shared/auth').AuthState
   state: AutoRunState | null
   rooms: RoomInfo[]
@@ -23,6 +26,7 @@ const props = defineProps<{
   dirty: boolean
 }>()
 const emit = defineEmits<{
+  windowHelp: []
   start: [options: AutoRunOptions]
   finish: []
   extend: [minutes:number,stopAt:number]
@@ -174,7 +178,7 @@ function start() {
     <section v-if="active" class="live-control surface" :aria-label="tr('运行控制', 'Run controls')">
       <div class="live-control-main">
         <span class="live-beacon" :class="{resting: phase === 'resting'}"><UiIcon :name="phase === 'resting' ? 'pause' : 'play'" /></span>
-        <div class="live-control-copy"><h2>{{ title }}</h2><p>{{ description }}</p><p v-if="state?.background">{{ tr('后台运行中 · 浏览器窗口已隐藏', 'Running in background · Browser windows hidden') }}</p></div>
+        <div class="live-control-copy"><h2>{{ title }}</h2><p>{{ description }}</p><p v-if="state?.background">{{ tr('后台运行中 · 任务页面无窗口', 'Running in background · Windowless task pages') }}</p></div>
         <div class="control-deadline"><span>{{ timedWaiting ? tr('定时结束','Scheduled stop') : phase === 'resting' ? tr('距离恢复','Resume in') : tr('本段截止','Session ends') }}</span><strong>{{ timedWaiting ? time(state?.session?.stopAt) : phase === 'resting' ? duration(state?.resumeRemainingSeconds) : time(state?.session?.hardStopAt) }}</strong></div>
       </div>
       <div class="live-control-actions">
@@ -212,14 +216,16 @@ function start() {
         </div>
         <h2 id="run-title">{{ title }}</h2>
         <p class="stage-description">{{ description }}</p>
+        <AuthDiagnostics :diagnostics="authDiagnostics" :language="config.language" :busy="!!(busy.login || busy.checkLogin || busy.start || busy.stop)" :running="active" @retry="emit('checkLogin')" @login="emit('login')" />
         <section v-if="loggedIn && !held" class="launch-options" aria-labelledby="launch-options-title" :aria-busy="!!busy.start">
           <div class="launch-heading"><h3 id="launch-options-title">{{ tr('本次运行选项', 'Options for this run') }}</h3><span>{{ tr('仅用于本次启动', 'For this start') }}</span></div>
           <label class="run-mode-card" :class="{ selected: background }">
             <span class="mode-icon"><UiIcon :name="background ? 'shield' : 'rooms'" :size="22" /></span>
-            <span class="mode-copy"><strong>{{ tr('后台运行', 'Run in background') }}</strong><small id="background-help">{{ background ? tr('任务不弹浏览器；进度在此查看。', 'Task windows stay hidden. Follow progress here.') : tr('开启后隐藏任务浏览器，减少窗口打扰。', 'Hide task browser windows to reduce interruptions.') }}</small></span>
+            <span class="mode-copy"><strong>{{ tr('后台运行', 'Run in background') }}</strong><small id="background-help">{{ background ? tr('运行时使用隐藏页面，不反复开窗或最小化；首次准备浏览器可能短暂显示空白窗口。', 'Tasks use hidden pages without repeated windows or minimization. Initial browser preparation may briefly show a blank window.') : tr('开启后使用隐藏任务页面，运行中不弹出浏览器窗口。', 'Use hidden task pages without opening browser windows during a run.') }}</small></span>
             <input v-model="background" type="checkbox" :aria-label="tr('后台运行', 'Run in background')" aria-describedby="background-help" :disabled="busy.start || busy.stop" />
           </label>
           <p class="launch-note">{{ tr('登录或验证需要你处理时，可主动打开浏览器。', 'Open the browser when sign-in or verification needs your attention.') }}</p>
+          <button class="inline-link window-help-link" @click="emit('windowHelp')">{{tr('关闭窗口后还会运行吗？','What happens when I close the window?')}}</button>
           <div class="form-grid compact">
             <label class="field-label">{{ tr('发现入口', 'Discovery page') }}<select v-model="sourceUrl" :aria-label="tr('发现入口', 'Discovery page')" :disabled="busy.start || busy.stop">
               <option value="https://live.douyin.com">{{ tr('直播首页', 'Live home') }}</option>
@@ -333,6 +339,11 @@ function start() {
         </div>
       </aside>
     </div>
+    <section v-if="active && state?.activity" class="surface activity-explanation" :aria-label="tr('运行状态说明','Run explanation')">
+      <div><span class="subtle">{{tr('当前正在','Now')}}</span><h3>{{activityLabel(state.activity.kind,config.language==='en-US')}}</h3><p>{{state.activity.reason}}</p></div>
+      <div><span class="subtle">{{tr('下一步','Next')}}</span><h3>{{nextActionLabel(state.activity.next,config.language==='en-US')}}</h3><p>{{state.activity.nextAt===null?tr('时间尚不能确定，等待实际反馈。','Time is unknown; waiting for evidence.'):tr(`预计 ${time(state.activity.nextAt)} 再检查，仍需满足运行条件。`,`Recheck around ${time(state.activity.nextAt)}, subject to operating conditions.`)}}</p></div>
+      <small>{{tr('状态更新','Updated')}} {{time(state.activity.observedAt)}}</small>
+    </section>
     <section class="run-monitor surface" :aria-label="tr('运行数据', 'Run data')">
       <div class="monitor-heading"><h2>{{ active ? tr('本次运行','This run') : tr('最近一次运行','Latest run') }}</h2><span>{{ report ? tr(`活跃 ${(report.activeMs / 60000).toFixed(1)} 分钟`, `${(report.activeMs / 60000).toFixed(1)} active min`) : tr('启动后生成独立运行数据','An independent report starts with each run') }}</span><button class="inline-link" @click="emit('records')">{{ tr('查看运行记录','View records') }}<UiIcon name="chevron" :size="14" /></button></div>
       <div class="run-numbers">

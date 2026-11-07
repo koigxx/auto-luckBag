@@ -1,3 +1,4 @@
+import type { ActivityObservation } from '../shared/experience'
 import { DEFAULT_BACKGROUND_RUN } from '../shared/run-options'
 import type { AutoRunOptions } from '../shared/run-options'
 export type { AutoRunOptions } from '../shared/run-options'
@@ -54,6 +55,8 @@ export class AutoRunner {
   private retryAt = 0
   private historyFreshAfter = 0
   private waitingReason = ''
+  private waitingUntil: number | null = null
+  private operation: 'discover' | 'verify' = 'discover'
   private log: (text: string) => void = () => {}
   private update: (state: ReturnType<AutoRunner['getState']>) => void = () => {}
   private resumeCheck: () => Promise<boolean> = async () => false
@@ -82,6 +85,20 @@ export class AutoRunner {
     this.log = log
     this.update = update
   }
+  private observation(): ActivityObservation {
+    const s=this.env.repository.read().activeAccount ? this.env.repository.account().session : emptySession()
+    const now=this.env.now(), gate=this.env.execution.waitObservation
+    let kind: ActivityObservation['kind']='discovery', next: ActivityObservation['next']='verify', nextAt: number | null=null, reason=this.waitingReason
+    if(s.phase==='stopped'||s.phase==='blocked'){kind=s.phase;next='manual';reason=s.reason}
+    else if(s.phase==='resting'){kind='resting';next=s.stopAt!==null&&s.nextResumeAt!==null&&s.stopAt<=s.nextResumeAt?'stop':s.policy.autoResume?'resume':'manual';nextAt=next==='stop'?s.stopAt:s.nextResumeAt;reason=sessionDisplayReason(s)}
+    else if(s.phase==='resume-check'){kind='checking';next='resume';reason=s.reason}
+    else if(gate){kind='waiting';next=gate.kind==='action'?'task':this.operation;nextAt=gate.until;reason=gate.kind==='action'?'等待操作间隔；完成后重新检查运行条件':'等待导航间隔；完成后重新检查运行条件'}
+    else if(this.rooms.getAllRooms().length){kind='task';next=s.finishRequested?'stop':s.phase==='draining'?(s.stopAt!==null&&s.hardStopAt!==null&&s.stopAt<=s.hardStopAt?'stop':'rest'):'task';reason=s.reason || '按当前房间阶段核对任务与开奖结果'}
+    else if(s.phase==='draining'){kind='waiting';next=s.finishRequested||s.stopAt!==null&&s.hardStopAt!==null&&s.stopAt<=s.hardStopAt?'stop':'rest';reason=s.reason}
+    else if(this.waitingReason){kind='waiting';next=this.waitingReason.includes('调整设置')?'manual':this.waitingReason.includes('扫描')?'discover':'verify';nextAt=this.retryAt>now?this.retryAt:this.waitingUntil}
+    else {next=this.operation;reason=this.busy?(this.operation==='discover'?'正在加载入口并发现直播间':'正在验证房间条件；完成时间取决于页面反馈'):'正在选择下一项任务'}
+    return {kind,reason,next,nextAt:Number.isFinite(nextAt)?nextAt:null,observedAt:now}
+  }
   getState() {
     const account = this.env.repository.read().activeAccount ? this.env.repository.account() : null,
       s = account?.session || emptySession()
@@ -95,6 +112,7 @@ export class AutoRunner {
       stopAt: s.stopAt,
       startedAt: s.startedAt,
       waitingReason: this.waitingReason,
+      activity: this.observation(),
       lastScanAt: this.lastScanAt,
       nextScanAt: s.phase === 'running' ? this.nextScanAt : null,
       candidateCount: this.pool.length,
@@ -157,6 +175,8 @@ export class AutoRunner {
     this.nextScanAt = this.env.now()
     this.retryAt = 0
     this.waitingReason = ''
+    this.waitingUntil = null
+    this.operation = 'discover'
     if (Object.values(this.env.repository.account().rooms).some(
       (r) => r.visits.length > 0 && r.lastSeenAt < this.historyFreshAfter
     )) this.log('已排除超过30分钟未验证的历史房间；重新发现后仍可验证，收藏与账本保留')
@@ -244,6 +264,7 @@ export class AutoRunner {
 
   async pulse(): Promise<void> {
     if (!this.env.repository.read().activeAccount) return
+    this.env.repository.sampleActivity?.(this.observation().kind)
     const before = this.env.repository.account().session.phase
     const s = this.env.sessionEngine.tick(this.rooms.getAllRooms().length > 0)
     if (!['running', 'draining'].includes(s.phase)) {
@@ -359,7 +380,8 @@ export class AutoRunner {
     }
     return e
   }
-  private wait(reason: string): false {
+  private wait(reason: string, until: number | null = null): false {
+    this.waitingUntil = until
     if (this.waitingReason !== reason) {
       this.waitingReason = reason
       if (reason) this.log(reason)
@@ -377,12 +399,13 @@ export class AutoRunner {
     this.wait(
       Number.isFinite(ready)
         ? `导航或新房探索小时额度已用完，${new Date(ready).toLocaleTimeString('zh-CN', { timeZone: this.env.policy().timezone, hour12: false })} 后再检查`
-        : '导航或新房探索额度为 0，等待调整设置后重新启动'
+        : '导航或新房探索额度为 0，等待调整设置后重新启动', Number.isFinite(ready) ? ready : null
     )
     return false
   }
   private async cycle(): Promise<boolean> {
     const signal = this.env.execution.signal
+    this.operation='verify'
     this.env.assertActive(signal, true)
     this.pool = this.pool.filter((r) => {
       if (r.drawAt !== null && r.drawAt > this.env.now()) return true
@@ -411,13 +434,13 @@ export class AutoRunner {
       'https://live.douyin.com/12345678', policy.navigationMaxSeconds * 1000, now)
     if (this.pool.some(r => r.evaluation.startAt < nextNavigation +
         Math.max(policy.navigationMaxSeconds, VERIFICATION_MAX_SECONDS + 10) * 1000))
-      return this.wait('等待候选预约进房，暂不验证其他房间')
+      return this.wait('等待候选预约进房，暂不验证其他房间', Math.min(...this.pool.map(r=>r.evaluation.startAt)))
     // Exploration must leave rolling-hour navigation slots for reserved returns.
     if (this.pool.length && account.navigations.filter(n => n.at > now - 3600000).length +
         this.pool.length >= policy.navigationsPerHour)
-      return this.wait('保留候选返房导航额度，暂不探索新房')
+      return this.wait('保留候选返房导航额度，暂不探索新房', Math.min(...this.pool.map(r=>r.evaluation.startAt)))
     if (this.pool.length >= this.env.store.get('candidatePoolLimit'))
-      return this.wait('候选池已满，等待预约进房')
+      return this.wait('候选池已满，等待预约进房', Math.min(...this.pool.map(r=>r.evaluation.startAt)))
     const a = this.env.repository.account(),
       rng = seededRandom(a.session.seed + a.decisions.length),
       p = this.env.policy()
@@ -454,9 +477,10 @@ export class AutoRunner {
       }
     if (!candidate) {
       // No repeated source scanning while an unverified queue remains.
-      if (this.env.now() < this.nextScanAt) return this.wait('等待下一次入口扫描')
+      if (this.env.now() < this.nextScanAt) return this.wait('等待下一次入口扫描', this.nextScanAt)
       if (!this.canNavigate(false)) return false
       this.wait('')
+      this.operation='discover'
       const scan = await this.discovery.scan({ sourceUrl: this.sourceUrl, maxRooms: 20 })
       this.env.assertActive(signal, true)
       this.lastScanAt = this.env.now()

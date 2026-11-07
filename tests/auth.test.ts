@@ -13,6 +13,7 @@ test('saved login requires background evidence, preserves unknown sessions, and 
   const Module = require('node:module'), original = Module._load
   let activeAccount: string | null = null, opened = 0, contexts = 0, saved = 0
   let existing: any = null
+  let loginRisk = false
   let verdict='connected', probes=0, closedProbes=0
   let release: (() => void) | undefined
   let waitForNavigation: Promise<void> | undefined
@@ -27,7 +28,7 @@ test('saved login requires background evidence, preserves unknown sessions, and 
   Module._load = function (name: string, ...args: any[]) {
     if (name === 'electron') return { app: { getPath: () => dir } }
     if (name === './runtime') return { repository: {
-      read: () => ({ activeAccount }), bind: (id: string) => { activeAccount = id },
+      read: () => ({ activeAccount, accounts: activeAccount ? {[activeAccount]:{risks:loginRisk?[{source:'login',resolvedAt:null}]:[]}} : {} }), bind: (id: string) => { activeAccount = id },
       unbind: () => { activeAccount = null }
     } }
     if (name === './store') return { store: { get: () => 0 } }
@@ -73,8 +74,17 @@ test('saved login requires background evidence, preserves unknown sessions, and 
     assert.equal(await new AuthService(browser).restoreSession(), false)
     write()
     const auth = new AuthService(browser)
+    const updates: import('../src/shared/auth').AuthStatus[]=[]
+    auth.setStatusListener(status=>updates.push(status))
     assert.deepEqual(await Promise.all([auth.restoreSession(), auth.restoreSession()]), [true, true])
     assert.equal(activeAccount, createHash('sha256').update('douyin-account:synthetic-user').digest('hex'))
+    assert.equal(auth.getStatus().diagnostics?.reason,'connected')
+    assert.equal(auth.getStatus().diagnostics?.identity,'passed')
+    const accountRevision=auth.getStatus().accountRevision
+    assert.equal(accountRevision,1)
+    assert.ok(updates.some(s=>s.state==='checking'))
+    assert.ok(!JSON.stringify(updates).includes('synthetic-user'))
+    assert.ok(!JSON.stringify(updates).includes('synthetic-session'))
     await auth.saveSession()
     assert.equal(contexts, 0)
     assert.equal(opened, 0)
@@ -82,22 +92,36 @@ test('saved login requires background evidence, preserves unknown sessions, and 
     assert.equal(probes, 1)
     assert.equal(closedProbes, 1)
     existing = context
+    const probesBeforeExisting = probes
     await auth.saveSession()
     assert.equal(saved, 2)
     verdict='unknown'
     const beforeUnknown=fs.readFileSync(file,'utf8')
     assert.equal(await auth.restoreSession(true),false)
+    assert.equal(probes,probesBeforeExisting,'an existing work context must be checked directly, not a cloned browser')
     assert.equal(auth.getStatus().state,'unknown')
     assert.equal(fs.readFileSync(file,'utf8'),beforeUnknown)
     await assert.rejects(auth.validateSession(),/暂时无法验证/)
     verdict='connected'
     assert.equal(await auth.restoreSession(true),true)
+    loginRisk=true
+    assert.equal(auth.getLoginStatus(),false,'a work-page login failure overrides cached connected status')
+    assert.equal(auth.getStatus().state,'expired')
+    const beforeRiskSave=saved
+    await auth.saveSession()
+    assert.equal(saved,beforeRiskSave+1,'verified manual-review session can persist before risk resolution')
+    assert.equal(auth.getLoginStatus(),false,'saving a session never clears the login risk')
+    loginRisk=false
+    assert.equal(auth.getLoginStatus(),true)
+    assert.equal(auth.getStatus().accountRevision,accountRevision,'same account checks retain log scope')
     verdict='expired'
     assert.equal(await auth.restoreSession(true),false)
     assert.equal(auth.getStatus().state,'expired')
+    assert.equal(auth.getStatus().diagnostics?.reason,'expired')
     assert.equal(fs.existsSync(file),true)
     verdict='connected'
     await auth.logout()
+    assert.equal(auth.getStatus().accountRevision,accountRevision!+1,'logout invalidates previous log scope')
     assert.equal(fs.existsSync(file), false)
     write()
     verdict='pending'
@@ -108,6 +132,7 @@ test('saved login requires background evidence, preserves unknown sessions, and 
     await backgroundCancelled.logout()
     assert.equal(await checking,false)
     assert.equal(backgroundCancelled.getStatus().state,'signed-out')
+    assert.equal(backgroundCancelled.getStatus().diagnostics,undefined)
     assert.equal(activeAccount,null)
     assert.equal(fs.existsSync(file),false)
     assert.equal(probes,closedProbes)
@@ -144,6 +169,7 @@ test('saved login requires background evidence, preserves unknown sessions, and 
     assert.equal(missingEntry.getStatus().state, 'checking')
     await pages.at(-1).close()
     assert.equal(await missingLogin, false)
+    assert.equal(missingEntry.getStatus().diagnostics?.reason,'closed')
     assert.equal(saved, savedBeforeCancel)
     assert.equal(activeAccount, null)
     assert.equal(pages.at(-1).listenerCount('close'), 0)
@@ -153,6 +179,8 @@ test('saved login requires background evidence, preserves unknown sessions, and 
     onReadEntry = () => { cookies[1].value = 'synthetic-other'; setImmediate(() => pages.at(-1).close()) }
     const changedAccount = new AuthService(browser)
     assert.equal(await changedAccount.login(), false)
+    assert.equal(changedAccount.getStatus().diagnostics?.identity,'failed')
+    assert.equal(changedAccount.getStatus().diagnostics?.reason,'account-changed')
     assert.equal(activeAccount, null)
     assert.equal(saved, savedBeforeCancel)
     onReadEntry = undefined

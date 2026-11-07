@@ -55,7 +55,7 @@ const api = {
   },
   // 事件监听
   on: (channel: string, callback: (...args: any[]) => void) => {
-    if (!['room:update','room:removed','log:add','run-stats:update','auto-run:update','alerts:update','navigate:records'].includes(channel)) throw new Error('Unsupported event')
+    if (!['auth:update','room:update','room:removed','log:add','run-stats:update','auto-run:update','alerts:update','navigate:records'].includes(channel)) throw new Error('Unsupported event')
     const subscription = (_event: any, ...args: any[]) => callback(...args)
     ipcRenderer.on(channel, subscription)
     return () => ipcRenderer.removeListener(channel, subscription)

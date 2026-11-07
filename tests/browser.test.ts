@@ -11,6 +11,7 @@ import { checkSignal } from '../src/main/execution-gate'
 import { parseLottery } from '../src/main/lottery-parser'
 import { visiblePageRisk } from '../src/main/page-risk'
 import { ManualReviewBrowser } from '../src/main/manual-review-browser'
+import { hasLiveLoginPrompt } from '../src/main/auth-dom'
 
 let browser: Browser
 before(async () => {
@@ -20,6 +21,55 @@ after(async () => {
   await browser?.close()
 })
 const url = 'https://live.douyin.com/12345678'
+const signedOutComposer='<div id="signed-out" style="position:fixed;right:5px;bottom:5px;width:280px;height:40px;background:white">需先<span style="cursor:pointer">登录</span>，才能开始聊天</div>'
+test('live signed-out composer blocks before any task or reservation and ignores ordinary chat',async()=>{
+  const p=await page(css+'<div class="lottery-dialog">福袋<button>加入粉丝团(1钻石)</button></div>'+signedOutComposer)
+  const h=harness(p,{membership:'needs-payment',cost:1})
+  try {
+    assert.equal(await hasLiveLoginPrompt(p),true)
+    await h.service.tick()
+    assert.equal(h.repo.account().risks[0].source,'login')
+    assert.match(h.risks[0],/直播间未登录/)
+    assert.equal(h.repo.account().risks[0].url,url)
+    assert.equal(Object.keys(h.repo.account().payments).length,0)
+    assert.equal(h.controller.signal.aborted,true)
+    await p.locator('#signed-out').evaluate(el=>el.style.display='none')
+    assert.equal(await hasLiveLoginPrompt(p),false)
+    await p.locator('#signed-out').evaluate(el=>{el.style.display='block';el.textContent='需先登录，才能开始聊天'})
+    assert.equal(await hasLiveLoginPrompt(p),false,'a quoted message is not the interactive login control')
+  } finally { await h.finish() }
+})
+
+test('manual review cannot clear a room login failure while the composer is still signed out',async()=>{
+  const context=await browser.newContext()
+  await context.route('**/*',r=>r.fulfill({contentType:'text/html; charset=utf-8',body:signedOutComposer}))
+  const manual=new ManualReviewBrowser(async()=>context)
+  try {
+    await manual.openManualReview(url,'fixture-account')
+    await assert.rejects(manual.checkManualReview('fixture-account'),/直播间未登录/)
+    await context.pages()[0].locator('#signed-out').evaluate(el=>el.remove())
+    await manual.checkManualReview('fixture-account')
+  } finally {await manual.closeManualReview();await context.close()}
+})
+test('login hydration holds task continuation, tolerates a disappearing prompt, and aborts promptly',async()=>{
+  const p=await page(signedOutComposer),controller=new AbortController(),risks:string[]=[]
+  const observer=new PassiveObserver(p,controller.signal,reason=>risks.push(reason))
+  let continued=false
+  try {
+    const checking=observer.checkPageRisk().then(()=>{continued=true})
+    await new Promise(resolve=>setTimeout(resolve,350))
+    assert.equal(continued,false,'task continuation remains blocked while login is uncertain')
+    await p.locator('#signed-out').evaluate(el=>el.remove())
+    await checking
+    assert.equal(continued,true)
+    assert.deepEqual(risks,[],'a transient loading prompt does not persist an expiry risk')
+    await p.evaluate(html=>document.body.innerHTML=html,signedOutComposer)
+    const aborted=observer.checkPageRisk()
+    controller.abort()
+    await aborted
+    assert.deepEqual(risks,[],'stopping during confirmation must not create a late risk')
+  }finally{observer.close();await p.context().close()}
+})
 test('visible slider and phone challenges block, hidden templates and ordinary chat do not',async()=>{
   const p=await page('<div id="captcha_container" style="width:400px;height:300px">请完成下列验证后继续</div>')
   try {
@@ -157,9 +207,9 @@ function harness(p: Page, patch: Partial<Opportunity> = {}, mayContinue:(o:Oppor
     policy: () => policy,
     assertActive: checkSignal,
     paymentReason: (_url, cost) => repo.canPay(url, cost, 10, false, policy),
-    reportRisk: (r) => {
+    reportRisk: (r, source, roomUrl) => {
       risks.push(r)
-      repo.risk(r, 'fixture')
+      repo.risk(r, source, roomUrl)
       controller.abort()
     },
     canFinish: () => true,
@@ -998,6 +1048,14 @@ test('payment timeout blocks and never assumes a successful charge', async () =>
     assert.equal(h.risks.length, 1)
     assert.equal(Object.values(h.repo.account().payments)[0].state, 'unresolved')
     assert.equal(h.repo.budget(10, false, h.env.policy()).spent, 0)
+    assert.equal(h.repo.account().risks[0].url,url,'payment review must return to the affected room')
+    const diagnostic=h.logs.find(m=>m.startsWith('支付回执超时诊断：'))!
+    assert.ok(diagnostic)
+    const flags=JSON.parse(diagnostic.split('：')[1].split('；')[0])
+    assert.equal(flags.dispatched,true)
+    assert.equal(flags.panelReadable,true)
+    assert.equal(flags.fanTaskCompleted,false)
+    assert.ok(Object.values(flags).every(v=>typeof v==='boolean'))
   } finally {
     await h.finish()
   }

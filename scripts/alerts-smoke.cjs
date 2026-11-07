@@ -2,7 +2,7 @@ const { _electron } = require('playwright')
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict'),ts=require('typescript')
 module.exports=async function alertsSmoke(output){
   const root=path.resolve(__dirname,'..'),dir=fs.mkdtempSync(path.join(output,'alerts-smoke-'))
-  for(const file of ['main/user-alerts','main/runtime-repository','shared/review','shared/policy']){
+  for(const file of ['main/user-alerts','main/runtime-repository','shared/review','shared/policy','shared/experience']){
     const target=path.join(dir,'src',file+'.js');fs.mkdirSync(path.dirname(target),{recursive:true})
     fs.writeFileSync(target,ts.transpileModule(fs.readFileSync(path.join(root,'src',file+'.ts'),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText)
   }

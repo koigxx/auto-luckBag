@@ -95,7 +95,8 @@ export async function perform<T>(
       if (readyAt - now >= 1000) executionLog(
         `${isDiscoveryUrl(navigation.url) ? '首页扫描' : '直播间导航'}等待间隔约 ${Math.ceil((readyAt - now) / 1000)} 秒，预计 ${new Date(readyAt).toLocaleTimeString('zh-CN', {timeZone:p.timezone,hour12:false})} 继续；当前保存的导航间隔 ${p.navigationMinSeconds}–${p.navigationMaxSeconds} 秒，重启不清除最近访问记录`
       )
-      await delay(readyAt - now, signal)
+      const clearWait = execution.observeWait(signal, readyAt, 'navigation')
+      try { await delay(readyAt - now, signal) } finally { clearWait() }
       assertActive(signal, true)
       repository.change((a) => {
         a.navigations = [

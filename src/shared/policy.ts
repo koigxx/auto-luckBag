@@ -172,6 +172,7 @@ export interface RiskRecord { at: number; reason: string; source: string; resolv
 export const riskId = (risk: RiskRecord): string => `risk:${risk.at}:${risk.source}:${risk.reason}`
 export interface DecisionRecord { at: number; url: string; action: string; reason: string; score: number | null; probability: number | null; seed?: number; snapshot?: {version:2;opportunity:Opportunity;leadSeconds:number;utility:number;mode:string;sampleCount:number} }
 export interface RunRecord {
+  activityTiming?: import('./experience').ActivityTiming
   silentEnd?: boolean
   id: string; startedAt: number; endedAt: number | null; reason: string
   activeBaseline: number; activeMs: number; budgetCycle: number; source: string

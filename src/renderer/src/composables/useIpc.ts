@@ -2,11 +2,12 @@ import { ref, onMounted, onUnmounted } from 'vue'
 import type { RoomInfo, AppConfig, LogEntry, Stats, RunStats, AutoRunState } from '../types'
 import {sortAlerts} from '../../../shared/review'
 import type { Insights } from '../../../shared/insights'
-import type { AuthState } from '../../../shared/auth'
+import type { AuthState, AuthStatus } from '../../../shared/auth'
 
 export function useIpc() {
   const isLoggedIn = ref(false)
   const authState = ref<AuthState>('checking')
+  const authDiagnostics = ref<AuthStatus['diagnostics']>()
   const ready = ref(false)
   const rooms = ref<RoomInfo[]>([])
   const config = ref<AppConfig | null>(null)
@@ -26,6 +27,17 @@ export function useIpc() {
   let disposed = false
   let refreshing = false
   let lastErrorAction: string | null = null
+  let accountRevision: number | undefined
+  function applyAuth(auth: AuthStatus) {
+    if(auth.accountRevision!==undefined && accountRevision!==undefined && auth.accountRevision<accountRevision)return
+    if(auth.accountRevision!==undefined && auth.accountRevision!==accountRevision){
+      accountRevision=auth.accountRevision
+      logs.value=[];insights.value=null;alerts.value=[]
+    }
+    authDiagnostics.value=auth.diagnostics
+    authState.value=auth.state || (auth.isLoggedIn?'connected':'signed-out')
+    isLoggedIn.value=auth.isLoggedIn
+  }
 
   const tr = (zh: string, en: string) => (config.value?.language === 'en-US' ? en : zh)
   function notify(text: string, kind: 'success' | 'error' | 'info' = 'success') {
@@ -64,8 +76,13 @@ export function useIpc() {
   async function refreshInsights() {
     if (refreshing || disposed) return
     refreshing = true
+    const revision=accountRevision
     try {
-      insights.value = isLoggedIn.value ? await window.api.insights.get() : null
+      // Expiry blocks tasks, but the main process may still have the same
+      // account bound. Keep its issue inbox reachable for manual recovery.
+      const result = isLoggedIn.value || authState.value==='expired' ? await window.api.insights.get() : null
+      if(disposed || revision!==accountRevision)return
+      insights.value = result
       if(insights.value?.alerts)alerts.value=sortAlerts([...alerts.value.filter(n=>n.kind==='login'),...insights.value.alerts])
     } finally {
       refreshing = false
@@ -93,8 +110,7 @@ export function useIpc() {
       window.api.autoRun.status()
     ])
     if (disposed) return
-    isLoggedIn.value = auth.isLoggedIn
-    authState.value = auth.state || (auth.isLoggedIn ? 'connected' : 'signed-out')
+    applyAuth(auth)
     config.value = currentConfig
     rooms.value = currentRooms
     runStats.value = currentStats
@@ -103,6 +119,7 @@ export function useIpc() {
   }
   onMounted(async () => {
     unsubscribers.push(
+      window.api.on('auth:update',applyAuth),
       window.api.on('alerts:update',(items:import('../../../shared/policy').UserAlert[])=>{alerts.value=items}),
       window.api.on('navigate:records',(kind:string)=>{alertDestination.value=kind}),
       window.api.on('room:update', (room: RoomInfo) => {
@@ -125,8 +142,7 @@ export function useIpc() {
         if(entry.status === 'stopped' || entry.status === 'blocked') {
           void window.api.auth.status().then(auth => {
             if(disposed)return
-            isLoggedIn.value=auth.isLoggedIn
-            authState.value=auth.state || (auth.isLoggedIn ? 'connected' : 'signed-out')
+            applyAuth(auth)
           }).catch(()=>{})
         }
       })
@@ -147,6 +163,7 @@ export function useIpc() {
   })
   const login = () =>
     action('login', async () => {
+      logs.value=[]
       const result = await window.api.auth.login()
       await refreshAccount()
       requireSuccess(result)
@@ -162,6 +179,7 @@ export function useIpc() {
   const logout = () =>
     action('logout', async () => {
       requireSuccess(await window.api.auth.logout())
+      logs.value=[];authDiagnostics.value=undefined
       await refreshAccount()
       notify(tr('已退出账号并停止任务。', 'Signed out and stopped all tasks.'))
       return true
@@ -247,6 +265,7 @@ export function useIpc() {
     ready,
     isLoggedIn,
     authState,
+    authDiagnostics,
     checkLogin,
     rooms,
     config,

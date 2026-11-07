@@ -1,3 +1,4 @@
+import { visiblePageRisk } from './page-risk'
 import { BrowserContext,Page } from 'playwright'
 import { BrowserManager } from './browser-manager'
 import { app } from 'electron'
@@ -10,11 +11,25 @@ import { store } from './store'
 import { probeSession } from './auth-probe'
 import { hasOwnProfileEntry } from './auth-dom'
 import { logInfo } from './logger'
-import type { AuthStatus, AuthState } from '../shared/auth'
+import type { AuthStatus, AuthState, AuthDiagnostics } from '../shared/auth'
 
 const AUTH_FILE=path.join(app.getPath('userData'),'auth.json')
 export class AuthService {
+  private diagnostics: AuthDiagnostics | undefined
+  private statusListener: (status: AuthStatus) => void = () => {}
+  setStatusListener(listener: (status: AuthStatus) => void): void { this.statusListener=listener }
+  private diagnostic(patch: Partial<AuthDiagnostics>, generation=this.generation): void {
+    if(generation!==this.generation || !this.diagnostics)return
+    this.diagnostics={...this.diagnostics,...patch,updatedAt:Date.now()}
+    try { this.statusListener(this.getStatus()) } catch { /* Display delivery never changes authentication. */ }
+  }
+  private beginDiagnostic(mode: AuthDiagnostics['mode']): void {
+    this.diagnostics={mode,startedAt:Date.now(),updatedAt:Date.now(),browser:'pending',page:'pending',evidence:'pending',identity:'pending',challenge:false,reason:'checking'}
+    this.diagnostic({})
+  }
   private isLoggedIn=false
+  // Ephemeral scope counter; no account identifier is sent to the renderer.
+  private accountRevision=0
   private page:Page|null=null
   private loggingIn=false
   private restoreAttempted=false
@@ -32,7 +47,15 @@ export class AuthService {
     this.restoreAttempted=true
     return this.beginCheck(5*60000)
   }
-  getStatus():AuthStatus { return {isLoggedIn:this.getLoginStatus(),state:this.state,checkedAt:this.checkedAt} }
+  private hasLiveLoginRisk():boolean {
+    const data=repository.read()
+    return !!data.activeAccount && !!data.accounts?.[data.activeAccount]?.risks.some(r=>r.source==='login'&&r.resolvedAt===null)
+  }
+  getStatus():AuthStatus {
+    const liveFailure=this.hasLiveLoginRisk()
+    return {isLoggedIn:this.getLoginStatus(),state:liveFailure?'expired':this.state,checkedAt:this.checkedAt,
+      diagnostics:this.diagnostics?{...this.diagnostics,...(liveFailure?{reason:'expired' as const,evidence:'failed' as const}: {})}:undefined,accountRevision:this.accountRevision}
+  }
   async restoreSession(force=false):Promise<boolean> {
     if(this.background)return this.background
     if(this.loggingIn)return false
@@ -47,33 +70,49 @@ export class AuthService {
     const generation=this.generation
     this.state='checking'
     this.isLoggedIn=false
+    this.beginDiagnostic('saved')
     let probe:Awaited<ReturnType<BrowserManager['createBackgroundContext']>>|undefined
     try {
       const existing=this.browser.getExistingContext()
-      if(!existing&&!fs.existsSync(AUTH_FILE)){this.state='signed-out';return false}
+      if(!existing&&!fs.existsSync(AUTH_FILE)){this.state='signed-out';this.diagnostic({reason:'no-session',browser:'unknown',page:'unknown',evidence:'unknown',identity:'unknown'},generation);return false}
       const state=existing?await existing.storageState():JSON.parse(fs.readFileSync(AUTH_FILE,'utf8'))
       if(signal.aborted||generation!==this.generation)return false
       if(!Array.isArray(state.cookies)||!Array.isArray(state.origins))throw new Error('Invalid saved session')
       const id=this.identityFromCookies(state.cookies)
-      if(!id){this.state='expired';return false}
-      probe=await this.browser.createBackgroundContext(state)
+      if(!id){this.state='expired';this.diagnostic({reason:'expired',identity:'failed',browser:'unknown',page:'unknown',evidence:'unknown'},generation);return false}
+      // A successful clone cannot establish the actual work browser's session.
+      const context=existing ?? (probe=await this.browser.createBackgroundContext(state)).context
       if(signal.aborted||generation!==this.generation)return false
-      const verdict=await probeSession(probe.context,signal)
+      this.diagnostic({browser:'passed'},generation)
+      const verdict=await probeSession(context,signal,15000,event=>{
+        if(signal.aborted)return
+        const patch: Partial<AuthDiagnostics> = event==='page-ready'?{page:'passed'}:event==='page-error'?{page:'failed',reason:'page-error'}:event==='evidence'?{evidence:'passed'}:event==='expired'?{evidence:'failed',reason:'expired'}:event==='challenge'?{challenge:true}:{reason:'closed'}
+        this.diagnostic(patch,generation)
+      })
       if(signal.aborted||generation!==this.generation)return false
       this.checkedAt=Date.now()
       this.state=verdict
+      if(verdict==='expired')this.diagnostic({evidence:'failed',identity:'unknown',reason:'expired'},generation)
       if(verdict==='connected') {
-        if(await this.accountId(probe.context)!==id){this.state='unknown';return false}
+        if(await this.accountId(context)!==id){this.state='unknown';this.diagnostic({identity:'failed',reason:'account-changed'},generation);return false}
         if(signal.aborted||generation!==this.generation)return false
         // A probe must never overwrite a live working context with an older snapshot.
-        if(!existing)await this.persist(probe.context)
+        if(!existing)await this.persist(context)
         if(signal.aborted||generation!==this.generation)return false
         this.bindAccount(id)
         return true
       }
       return false
-    } catch { if(!signal.aborted&&generation===this.generation)this.state='unknown';return false }
-    finally { await probe?.close().catch(()=>{}) }
+    } catch { if(!signal.aborted&&generation===this.generation){this.state='unknown';this.diagnostic({reason:this.diagnostics?.browser==='passed'?'no-evidence':'browser-error',browser:this.diagnostics?.browser==='passed'?'passed':'failed'},generation)}return false }
+    finally {
+      if(!signal.aborted&&generation===this.generation&&this.state!=='connected')this.diagnostic({
+        page:this.diagnostics?.page==='pending'?'unknown':this.diagnostics?.page,
+        identity:this.diagnostics?.identity==='pending'?'unknown':this.diagnostics?.identity,
+        evidence:this.state==='expired'?'failed':'unknown',
+        reason:this.diagnostics?.reason==='checking'?'no-evidence':this.diagnostics?.reason
+      },generation)
+      await probe?.close().catch(()=>{})
+    }
   }
   private beginCheck(waitMs:number):Promise<boolean> {
     if(this.pendingCheck)throw new Error('登录窗口已打开')
@@ -85,6 +124,7 @@ export class AuthService {
     this.loggingIn=true
     this.state='checking'
     const generation=this.generation
+    this.beginDiagnostic('manual')
     const controller=new AbortController()
     this.loginAbort=controller
     let page:Page|null=null
@@ -95,24 +135,32 @@ export class AuthService {
       if(generation!==this.generation||controller.signal.aborted)return false
       const context=await this.browser.getContext()
       if(generation!==this.generation||controller.signal.aborted)return false
+      this.diagnostic({browser:'passed'},generation)
       page=await context.newPage()
       this.page=page
       page.once('close',closed)
       if(generation!==this.generation||controller.signal.aborted)return false
       await page.goto('https://live.douyin.com',{waitUntil:'domcontentloaded',timeout:Math.min(30000,waitMs)})
+      this.diagnostic({page:'passed'},generation)
       const until=Date.now()+waitMs
       const active=()=>generation===this.generation&&!controller.signal.aborted&&Date.now()<until&&!page!.isClosed()
       while(active()) {
         const id=await this.accountId(context)
         const ownAvatar=await hasOwnProfileEntry(page)
+        const challenge=!!await visiblePageRisk(page).catch(()=>'')
+        if(active())this.diagnostic({evidence:ownAvatar?'passed':'pending',identity:'pending',challenge},generation)
         // Diagnostic flags only: never log cookie values, account hashes or DOM.
         const evidence=`稳定账号=${id?'已确认':'未确认'}，新版顶部头像=${ownAvatar?'已确认':'未确认'}`
         if(evidence!==lastEvidence){logInfo('auth',evidence);lastEvidence=evidence}
         // Check the same stable account again after reading the current page.
-        if(id&&ownAvatar&&active()&&await this.accountId(context)===id&&active()) {
+        const sameAccount=id&&ownAvatar&&active()?await this.accountId(context)===id:false
+        if(id&&ownAvatar&&active()&&!sameAccount)this.diagnostic({identity:'failed',reason:'account-changed'},generation)
+        if(sameAccount&&active()) {
           await this.persist(context)
-          if(!active()||await this.accountId(context)!==id||!active())return false
-          this.bindAccount(id)
+          if(!active())return false
+          if(await this.accountId(context)!==id){if(active())this.diagnostic({identity:'failed',reason:'account-changed'},generation);return false}
+          if(!active())return false
+          this.bindAccount(id!)
           logInfo('auth','登录已确认，会话已保存')
           return true
         }
@@ -123,17 +171,28 @@ export class AuthService {
       return false
     } catch(error) {
       if(controller.signal.aborted||generation!==this.generation||page?.isClosed())return false
+      this.diagnostic({reason:this.diagnostics?.browser==='passed'?'page-error':'browser-error',page:'failed'},generation)
       throw error
     } finally {
       page?.off('close',closed)
       if(generation===this.generation&&this.state==='checking')logInfo('auth',controller.signal.aborted?'登录窗口已关闭':'登录校验未完成')
+      if(generation===this.generation&&this.state==='checking'){
+        this.state='signed-out'
+        this.diagnostic({
+          reason:this.diagnostics?.reason==='account-changed'?'account-changed':controller.signal.aborted?'closed':this.diagnostics?.reason==='checking'?'no-evidence':this.diagnostics?.reason,
+          browser:this.diagnostics?.browser==='pending'?'unknown':this.diagnostics?.browser,
+          page:this.diagnostics?.page==='pending'?'unknown':this.diagnostics?.page,
+          identity:this.diagnostics?.identity==='pending'?'unknown':this.diagnostics?.identity,
+          evidence:this.diagnostics?.evidence==='passed'?'passed':'unknown'
+        },generation)
+      }
       controller.abort()
       await page?.close().catch(()=>{})
       this.page=null;this.loggingIn=false;this.loginAbort=null
       if(generation===this.generation&&this.state==='checking')this.state='signed-out'
     }
   }
-  getLoginStatus():boolean{return this.isLoggedIn&&!!repository.read().activeAccount}
+  getLoginStatus():boolean{return this.isLoggedIn&&!!repository.read().activeAccount&&!this.hasLiveLoginRisk()}
   async validateSession():Promise<boolean> {
     if(this.getLoginStatus()&&this.checkedAt&&Date.now()-this.checkedAt>=0&&Date.now()-this.checkedAt<5*60000)return true
     const valid=await this.restoreSession(true)
@@ -142,11 +201,13 @@ export class AuthService {
   }
   async logout():Promise<void> {
     this.generation++;this.restoreAttempted=true
+    this.accountRevision++
     this.loginAbort?.abort()
     this.backgroundAbort?.abort()
     await this.background
-    this.state='signed-out';this.checkedAt=null
+    this.state='signed-out';this.checkedAt=null;this.diagnostics=undefined
     this.isLoggedIn=false;await this.page?.close().catch(()=>{});repository.unbind()
+    try { this.statusListener(this.getStatus()) } catch { /* Display delivery never interrupts logout. */ }
     await this.pendingCheck?.catch(()=>{})
     if(fs.existsSync(AUTH_FILE))fs.unlinkSync(AUTH_FILE)
     await this.browser.closeContext()
@@ -158,7 +219,9 @@ export class AuthService {
     await this.background
     await this.page?.close().catch(()=>{})
     await this.pendingCheck?.catch(()=>{})
-    if(!this.getLoginStatus())return
+    // Manual review saves the verified session before resolving its login risk.
+    // Persisting it must not clear the risk or make automatic tasks eligible.
+    if(!this.isLoggedIn||this.state!=='connected')return
     const context=this.browser.getExistingContext()
     if(!context)return
     if(await this.accountId(context)===repository.read().activeAccount)
@@ -177,9 +240,11 @@ export class AuthService {
     return this.identityFromCookies(await context.cookies('https://live.douyin.com'))
   }
   private bindAccount(id:string):void {
+    if(repository.read().activeAccount!==id)this.accountRevision++
     repository.bind(id,{spent:store.get('diamondUsed'),stats:{...store.get('runStats')},rooms:store.get('preferredRooms')||[]})
     this.isLoggedIn=true
     this.state='connected';this.checkedAt=Date.now()
+    this.diagnostic({reason:'connected',browser:'passed',page:this.diagnostics?.page==='passed'?'passed':'unknown',evidence:'passed',identity:'passed'})
   }
   private identityFromCookies(input:unknown[]):string|null {
     const cookies=input.filter((c):c is {name:string,value:string,expires:number,domain:string,path:string}=>{

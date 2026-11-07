@@ -236,6 +236,7 @@ module.exports = async function verifyUI(config, output) {
       window.api = {
         auth: {
           status: async (force = false) => {
+            if(fixture.authOverride)return copy(fixture.authOverride)
             const mode = new URL(location.href).searchParams.get('auth')
             if (force && mode === 'unknown') fixture.loggedIn = true
             return { isLoggedIn: fixture.loggedIn, state: fixture.loggedIn ? 'connected' : mode || 'signed-out', checkedAt: null }
@@ -343,7 +344,7 @@ module.exports = async function verifyUI(config, output) {
         insights: {
           openClaim:async()=>{count('openClaim');return {success:true}},
           claim:async(key,claimed)=>{count('claim');fixture.insights.rounds.find(r=>r.key===key).claimed=claimed;return {success:true}},
-          get: async () => (fixture.loggedIn ? copy(fixture.insights) : null),
+          get: async () => {count('insightsGet');return fixture.loggedIn ? copy(fixture.insights) : null},
           room: async (roomUrl, patch) => {
             fixture.lastRoomPatch = copy(patch)
             if (fixture.rejectRoomChange) return { success: false, error: '模拟房间设置保存失败' }
@@ -485,7 +486,7 @@ module.exports = async function verifyUI(config, output) {
     await page.evaluate(() => window.__fixture.releaseStart())
     await page.getByRole('button', { name: '立即停止', exact: true }).waitFor()
     check(await page.locator('.dashboard-view .candidates').isVisible() && await page.locator('.monitor-resources').isVisible(), 'active workspace restores queue and resource monitoring')
-    check(await page.getByText('后台运行中 · 浏览器窗口已隐藏').isVisible(), 'running mode visible in dashboard')
+    check(await page.getByText('后台运行中 · 任务页面无窗口').isVisible(), 'running mode visible in dashboard')
     await page.evaluate(() => window.__fixture.populate())
     await page.getByText('示例生活好物直播间', { exact: true }).waitFor()
     await page.evaluate(()=>{const f=window.__fixture;f.originalCandidateName=f.state.candidates[0].name;f.state.candidates[0].name=f.state.candidates[0].url;f.emit('auto-run:update',f.state)})
@@ -685,6 +686,17 @@ module.exports = async function verifyUI(config, output) {
     check(await page.locator('.review-row [role="status"]').getByText('页面仍显示验证或异常，请完成后再检查',{exact:true}).isVisible(),'failed review displays actionable feedback next to issue')
     check((await page.evaluate(()=>window.__fixture.insights.risks[0].resolvedAt))===null,'failed review keeps risk unresolved')
     check((await page.evaluate(()=>window.__fixture.calls.resolveRisk))===1,'completion button dispatches exactly once without forcing click')
+    const insightReads=await page.evaluate(()=>window.__fixture.calls.insightsGet)
+    await page.evaluate(()=>{
+      const f=window.__fixture
+      f.insights.risks[0].source='login'
+      f.authOverride={isLoggedIn:false,state:'expired',checkedAt:Date.now()}
+      f.emit('auth:update',f.authOverride)
+    })
+    await page.waitForFunction(previous=>window.__fixture.calls.insightsGet>previous,insightReads,{timeout:8000})
+    check(await page.getByRole('button',{name:'前往浏览器处理',exact:true}).isVisible(),'expired login keeps the bound-account recovery inbox accessible after refresh')
+    check(await page.getByText('当前任务浏览器未登录。',{exact:false}).isVisible(),'login issue explains how to recover the actual room session')
+    await page.evaluate(()=>{const f=window.__fixture;delete f.authOverride;f.emit('auth:update',{isLoggedIn:true,state:'connected',checkedAt:Date.now()})})
     await page.evaluate(()=>{window.__fixture.insights.payments[0].state='unresolved';delete window.__fixture.riskError})
     await nav('运行面板').click()
     await nav('运行记录').click()
@@ -891,6 +903,85 @@ module.exports = async function verifyUI(config, output) {
     await page.goto('https://fixture.local/?auth=expired')
     await page.getByRole('heading',{name:'登录已失效，请重新登录'}).waitFor()
     check(await page.getByRole('button',{name:'登录抖音',exact:true}).first().isVisible(), 'explicit expiry offers manual login')
+    // Six operational-experience features, using only isolated IPC fixtures.
+    await page.evaluate(()=>window.__fixture.emit('auth:update',{isLoggedIn:false,state:'unknown',checkedAt:null,diagnostics:{mode:'saved',startedAt:Date.now()-1000,updatedAt:Date.now(),browser:'passed',page:'failed',evidence:'unknown',identity:'unknown',challenge:false,reason:'page-error'}}))
+    await page.locator('.auth-diagnostics summary').click()
+    check(await page.getByText('页面未能完成加载，请检查网络后重试。',{exact:true}).isVisible(),'diagnostics explain page failure without losing saved session')
+    check(await page.getByRole('button',{name:'重新校验登录',exact:true}).isEnabled(),'diagnostics provide explicit retry action')
+    await capture(page,{path:path.join(output,'ui-auth-diagnostics.png'),fullPage:true})
+    await page.getByRole('button',{name:'窗口与后台说明',exact:true}).click()
+    check(await page.getByRole('dialog').getByText('关闭主窗口',{exact:true}).isVisible(),'window help distinguishes close from quit')
+    check(await page.getByRole('dialog').getByText('仅隐藏到托盘，当前计划继续执行，包括计划休息。可从托盘重新显示窗口。',{exact:true}).isVisible(),'closing behavior is explicit')
+    await page.getByRole('button',{name:'知道了',exact:true}).click()
+    await page.getByRole('button',{name:'打开登录窗口',exact:true}).click()
+    await nav('策略设置').click()
+    await page.getByRole('button',{name:'支出与粉丝团',exact:true}).click()
+    await page.getByLabel('总钻石预算',{exact:true}).fill('75')
+    check(await page.getByLabel('本次设置变更',{exact:true}).getByText('75',{exact:true}).isVisible(),'draft summary displays changed value')
+    await page.getByRole('button',{name:'参与偏好',exact:true}).click()
+    await page.getByRole('radio',{name:/钻石偏好/}).check()
+    check(await page.getByLabel('本次设置变更',{exact:true}).getByText('参与机会',{exact:true}).isVisible(),'objective diff translates the actual opportunity enum')
+    await page.getByRole('button',{name:'支出与粉丝团',exact:true}).click()
+    await capture(page,{path:path.join(output,'ui-settings-changes.png'),fullPage:true})
+    await page.getByRole('button',{name:'还原更改',exact:true}).click()
+    check(await page.locator('.settings-changes').count()===0,'discard clears the change summary')
+    await nav('运行面板').click()
+    await page.evaluate(()=>{
+      const f=window.__fixture;f.populate();f.phase('running')
+      f.state.activity={kind:'waiting',reason:'等待导航间隔',next:'verify',nextAt:Date.now()+30000,observedAt:Date.now()}
+      f.emit('auto-run:update',f.state)
+    })
+    check(await page.getByLabel('运行状态说明',{exact:true}).getByText('调度等待',{exact:true}).isVisible(),'run explanation shows actual scheduler phase')
+    check(await page.getByText('预计 ',{exact:false}).filter({hasText:'再检查'}).isVisible(),'known next check is qualified rather than promised')
+    await page.evaluate(()=>{const f=window.__fixture;f.state.activity.nextAt=null;f.emit('auto-run:update',f.state)})
+    check(await page.getByText('时间尚不能确定，等待实际反馈。',{exact:true}).isVisible(),'unknown timing is not fabricated')
+    await capture(page,{path:path.join(output,'ui-runtime-explanation.png'),fullPage:true})
+    await page.evaluate(()=>{
+      const f=window.__fixture;f.phase('stopped')
+      const r=f.insights.reports[0];r.endedAt=Date.now();r.activityTiming={totals:{waiting:120000,task:60000},lastAt:Date.now(),kind:'stopped'};r.skipReasons={'任务时间不足':3}
+      f.emit('log:add',{time:Date.now()-500,roomId:'auto',runId:'live',message:'private fixture secret'})
+      f.emit('log:add',{time:Date.now()-500,roomId:'auto',runId:'other',message:'unrelated run'})
+    })
+    await nav('运行记录').click()
+    await page.getByLabel('运行范围',{exact:true}).selectOption('live')
+    await page.getByText('采样覆盖 3.0 分钟',{exact:false}).waitFor()
+    check(await page.getByText('任务时间不足',{exact:false}).isVisible(),'run review surfaces top skip reasons')
+    await capture(page,{path:path.join(output,'ui-run-review.png'),fullPage:true})
+    await page.getByRole('button',{name:'查看本次运行日志',exact:true}).click()
+    check(await page.locator('.log-line').count()===1,'record link restricts logs to persisted run identity')
+    check(await page.locator('.log-line').getByText('private fixture secret',{exact:true}).isVisible(),'linked log retains local detail')
+    await page.evaluate(()=>Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async text=>{window.__fixture.copied=text}}}))
+    await page.getByRole('button',{name:'复制脱敏诊断摘要',exact:true}).click()
+    check(await page.evaluate(()=>!window.__fixture.copied.includes('private fixture secret')&&!window.__fixture.copied.includes('live')),'copied summary excludes messages and identifiers')
+    await page.evaluate(()=>Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async()=>{throw new Error('denied')}}}))
+    await page.getByRole('button',{name:'复制脱敏诊断摘要',exact:true}).click()
+    check(await page.getByText('复制失败，请检查剪贴板权限后重试。',{exact:true}).isVisible(),'clipboard failure has visible feedback')
+    await page.getByRole('button',{name:'清除关联筛选',exact:true}).click()
+    check(await page.locator('.log-line').count()>=2,'clear linked filter restores other logs')
+    await page.evaluate(()=>window.__fixture.emit('auth:update',{isLoggedIn:true,state:'connected',checkedAt:Date.now(),accountRevision:1}))
+    check(await page.locator('.log-line').count()===0,'new account scope clears previous logs')
+    await page.evaluate(()=>{
+      const f=window.__fixture
+      f.emit('log:add',{time:Date.now(),roomId:'system',message:'current scope'})
+      f.emit('auth:update',{isLoggedIn:true,state:'connected',checkedAt:Date.now(),accountRevision:1})
+    })
+    check(await page.locator('.log-line').count()===1,'same account recheck retains current logs')
+    await page.evaluate(()=>window.__fixture.emit('auth:update',{isLoggedIn:true,state:'connected',checkedAt:Date.now(),accountRevision:2}))
+    check(await page.locator('.log-line').count()===0,'account switch clears previous scope')
+    for(const width of [800,390]){
+      await page.setViewportSize({width,height:820})
+      for(const destination of ['运行日志','运行记录','策略设置','运行面板']){
+        await nav(destination).click()
+        check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'operational views fit '+width+' '+destination)
+      }
+      await capture(page,{path:path.join(output,`ui-experience-${width}.png`),fullPage:true})
+    }
+    await page.setViewportSize({width:1180,height:820})
+    await page.locator('.language-select').selectOption('en-US')
+    await page.getByRole('button',{name:'Window and background help',exact:true}).click()
+    check(await page.getByRole('dialog').getByText('Close main window',{exact:true}).isVisible(),'new window help supports English')
+    await page.keyboard.press('Escape')
+    check(await page.getByRole('dialog').count()===0,'window help supports keyboard dismissal')
     check(errors.length === 0, `no page errors: ${errors.join('; ')}`)
     console.log(
       `UI smoke passed: ${checks} interaction/layout checks; offline screenshots in .test-output/ui-*.png`
